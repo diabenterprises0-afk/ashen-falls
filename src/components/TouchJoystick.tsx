@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useCallback, memo } from 'react';
 import { JoystickConfig } from '../types/game';
 import { triggerHaptic } from '../utils/storage';
 
@@ -8,22 +8,21 @@ interface TouchJoystickProps {
   className?: string;
 }
 
-export const TouchJoystick: React.FC<TouchJoystickProps> = ({
+export const TouchJoystick: React.FC<TouchJoystickProps> = memo(({
   config,
   onVectorChange,
   className = '',
 }) => {
   const baseRef = useRef<HTMLDivElement>(null);
+  const knobRef = useRef<HTMLDivElement>(null);
   const activePointerId = useRef<number | null>(null);
 
-  // Knob relative offset from center of base in pixels (starts exactly at 0, 0)
-  const [knobPos, setKnobPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isActive, setIsActive] = useState(false);
   const [isSprinting, setIsSprinting] = useState(false);
+  const isSprintingRef = useRef(false);
 
-  // Smoothed vector refs to eliminate jitter without latency
+  // Runtime vector tracking (zero allocation)
   const currentVectorRef = useRef({ x: 0, y: 0, magnitude: 0 });
-  const animFrameRef = useRef<number | null>(null);
 
   const maxRadius = config.radius || 54;
   const deadzoneRadius = Math.max(4, (config.deadzone || 0.12) * maxRadius);
@@ -33,9 +32,14 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = ({
     activePointerId.current = null;
     setIsActive(false);
     setIsSprinting(false);
-    setKnobPos({ x: 0, y: 0 });
-    currentVectorRef.current = { x: 0, y: 0, magnitude: 0 };
-    onVectorChange({ x: 0, y: 0, magnitude: 0 });
+    isSprintingRef.current = false;
+    if (knobRef.current) {
+      knobRef.current.style.transform = 'translate3d(0px, 0px, 0)';
+    }
+    currentVectorRef.current.x = 0;
+    currentVectorRef.current.y = 0;
+    currentVectorRef.current.magnitude = 0;
+    onVectorChange(currentVectorRef.current);
   }, [onVectorChange]);
 
   // Compute vector from screen touch coordinates relative to base center
@@ -52,10 +56,17 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = ({
 
       if (distance < deadzoneRadius) {
         // Inside circular dead zone: no accidental drift
-        setIsSprinting(false);
-        setKnobPos({ x: 0, y: 0 });
-        currentVectorRef.current = { x: 0, y: 0, magnitude: 0 };
-        onVectorChange({ x: 0, y: 0, magnitude: 0 });
+        if (isSprintingRef.current) {
+          isSprintingRef.current = false;
+          setIsSprinting(false);
+        }
+        if (knobRef.current) {
+          knobRef.current.style.transform = 'translate3d(0px, 0px, 0)';
+        }
+        currentVectorRef.current.x = 0;
+        currentVectorRef.current.y = 0;
+        currentVectorRef.current.magnitude = 0;
+        onVectorChange(currentVectorRef.current);
         return;
       }
 
@@ -85,35 +96,32 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = ({
       const normalizedGameX = clampedMag > 0 ? (gameX / clampedMag) * finalMagnitude : 0;
       const normalizedGameY = clampedMag > 0 ? (gameY / clampedMag) * finalMagnitude : 0;
 
-      // Visual knob clamping
+      // Visual knob clamping directly via style transform
       const visualDistance = Math.min(distance, maxRadius);
       const clampedKnobX = dirX * visualDistance;
       const clampedKnobY = dirY * visualDistance;
 
-      setKnobPos({ x: clampedKnobX, y: clampedKnobY });
+      if (knobRef.current) {
+        knobRef.current.style.transform = `translate3d(${clampedKnobX}px, ${clampedKnobY}px, 0)`;
+      }
 
       // Sprint state threshold check
       const inSprint = finalMagnitude >= (config.sprintThreshold || 0.88);
-      if (inSprint !== isSprinting) {
+      if (inSprint !== isSprintingRef.current) {
+        isSprintingRef.current = inSprint;
         setIsSprinting(inSprint);
         if (inSprint && config.haptics) {
           triggerHaptic(20);
         }
       }
 
-      currentVectorRef.current = {
-        x: normalizedGameX,
-        y: normalizedGameY,
-        magnitude: finalMagnitude,
-      };
+      currentVectorRef.current.x = normalizedGameX;
+      currentVectorRef.current.y = normalizedGameY;
+      currentVectorRef.current.magnitude = finalMagnitude;
 
-      onVectorChange({
-        x: normalizedGameX,
-        y: normalizedGameY,
-        magnitude: finalMagnitude,
-      });
+      onVectorChange(currentVectorRef.current);
     },
-    [baseRef, config, deadzoneRadius, maxRadius, isSprinting, onVectorChange]
+    [baseRef, config, deadzoneRadius, maxRadius, onVectorChange]
   );
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -149,12 +157,6 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = ({
     }
     resetToCenter();
   };
-
-  useEffect(() => {
-    return () => {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    };
-  }, []);
 
   const baseDiameter = maxRadius * 2;
   const knobDiameter = maxRadius * 0.85;
@@ -211,7 +213,8 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = ({
 
         {/* Dynamic Glowing Thumb Knob */}
         <div
-          className={`absolute rounded-full border-2 flex items-center justify-center pointer-events-none transition-transform duration-75 shadow-lg ${
+          ref={knobRef}
+          className={`absolute rounded-full border-2 flex items-center justify-center pointer-events-none shadow-lg will-change-transform ${
             isSprinting
               ? 'border-amber-300 bg-gradient-to-br from-amber-500 to-amber-700 shadow-[0_0_15px_rgba(245,158,11,0.6)] scale-105'
               : isActive
@@ -221,7 +224,7 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = ({
           style={{
             width: `${knobDiameter}px`,
             height: `${knobDiameter}px`,
-            transform: `translate(${knobPos.x}px, ${knobPos.y}px)`,
+            transform: 'translate3d(0px, 0px, 0)',
           }}
         >
           {/* Thumb Inner Core Pip */}
@@ -238,4 +241,4 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = ({
       </div>
     </div>
   );
-};
+});

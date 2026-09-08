@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, memo } from 'react';
 import { JoystickConfig } from '../types/game';
 
 interface CameraTouchZoneProps {
@@ -7,7 +7,7 @@ interface CameraTouchZoneProps {
   className?: string;
 }
 
-export const CameraTouchZone: React.FC<CameraTouchZoneProps> = ({
+export const CameraTouchZone: React.FC<CameraTouchZoneProps> = memo(({
   config,
   onCameraRotate,
   className = '',
@@ -19,8 +19,11 @@ export const CameraTouchZone: React.FC<CameraTouchZoneProps> = ({
     // Only capture if primary pointer in this zone
     if (activePointerId.current !== null) return;
     activePointerId.current = e.pointerId;
-    lastPos.current = { x: e.clientX, y: e.clientY };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    lastPos.current.x = e.clientX;
+    lastPos.current.y = e.clientY;
+    try {
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    } catch (err) {}
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -28,7 +31,8 @@ export const CameraTouchZone: React.FC<CameraTouchZoneProps> = ({
 
     const dx = e.clientX - lastPos.current.x;
     const dy = e.clientY - lastPos.current.y;
-    lastPos.current = { x: e.clientX, y: e.clientY };
+    lastPos.current.x = e.clientX;
+    lastPos.current.y = e.clientY;
 
     const sensitivity = (config.cameraSensitivity || 1.0) * 0.006;
     const invertFactor = config.cameraInvertY ? -1 : 1;
@@ -39,6 +43,9 @@ export const CameraTouchZone: React.FC<CameraTouchZoneProps> = ({
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (activePointerId.current === e.pointerId) {
       activePointerId.current = null;
+      try {
+        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch (err) {}
     }
   };
 
@@ -51,4 +58,4 @@ export const CameraTouchZone: React.FC<CameraTouchZoneProps> = ({
       className={`touch-none select-none ${className}`}
     />
   );
-};
+});

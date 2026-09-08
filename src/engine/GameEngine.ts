@@ -26,6 +26,16 @@ export interface GameEngineCallbacks {
   onModelInfoUpdate?: (info: CustomModelInfo) => void;
 }
 
+interface PooledParticle {
+  mesh: THREE.Mesh;
+  velocity: THREE.Vector3;
+  life: number;
+  maxLife: number;
+  active: boolean;
+  isRing: boolean;
+  baseSize: number;
+}
+
 export class GameEngine {
   private container: HTMLElement;
   private callbacks: GameEngineCallbacks;
@@ -140,15 +150,19 @@ export class GameEngine {
   private playerRightLeg!: THREE.Group;
   private slashTrailMesh!: THREE.Mesh;
 
+  // Lighting References
+  private keyLight!: THREE.DirectionalLight;
+  private fillLight!: THREE.DirectionalLight;
+  private hemiLight!: THREE.HemisphereLight;
+  private groundMesh!: THREE.Mesh;
+
   // Custom GLB Model & Animations
   public modelConfig: ModelCalibrationConfig;
   public customModelInfo: CustomModelInfo;
   private customModelGroup: THREE.Group | null = null;
   private animationMixer: THREE.AnimationMixer | null = null;
   private animationActions: Map<string, THREE.AnimationAction> = new Map();
-  private actionClipMap: Map<string, THREE.AnimationAction> = new Map();
   private currentAnimationAction: THREE.AnimationAction | null = null;
-  private prevPlayerAction: ActionState = 'IDLE';
   private gltfLoader = new GLTFLoader();
 
   // Material references for parallel texture streaming
@@ -158,25 +172,51 @@ export class GameEngine {
   private circleMat: THREE.MeshBasicMaterial | null = null;
   private loadedAssets: LoadedGameAssets | null = null;
 
-  // World objects
+  // World objects & Obstacles
   private braziers: { light: THREE.PointLight; mesh: THREE.Group; x: number; z: number }[] = [];
   private enemies: EnemyEntity[] = [];
   private enemyMeshes: Map<string, THREE.Group> = new Map();
-  private particles: {
-    mesh: THREE.Mesh;
-    velocity: THREE.Vector3;
-    life: number;
-    maxLife: number;
-    color: THREE.Color;
-    size: number;
-  }[] = [];
-
-  // Static Collision Obstacles (Pillars, Braziers)
   private arenaObstacles: { x: number; z: number; radius: number }[] = [];
+
+  // Zero-Allocation Particle Pool
+  private particlePool: PooledParticle[] = [];
+  private sparkGeo = new THREE.SphereGeometry(0.06, 4, 4);
+  private ringGeo = new THREE.RingGeometry(0.2, 0.6, 20);
+  private critSparkMat = new THREE.MeshBasicMaterial({ color: 0xf59e0b });
+  private normalSparkMat = new THREE.MeshBasicMaterial({ color: 0x67e8f9 });
+  private healSparkMat = new THREE.MeshBasicMaterial({ color: 0x4ade80 });
+  private runeRingMat = new THREE.MeshBasicMaterial({
+    color: 0x22d3ee,
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.9,
+  });
+
+  // Shared Brazier Geometries & Materials (Instanced/Reused for zero duplicate allocations)
+  private brazierStandGeo = new THREE.CylinderGeometry(0.35, 0.55, 1.8, 6);
+  private brazierBowlGeo = new THREE.CylinderGeometry(0.85, 0.4, 0.5, 6);
+  private brazierFlameGeo = new THREE.SphereGeometry(0.35, 6, 6);
+  private brazierStandMat = new THREE.MeshStandardMaterial({ color: 0x362c4a, metalness: 0.6, roughness: 0.4 });
+  private brazierBowlMat = new THREE.MeshStandardMaterial({ color: 0x272036, metalness: 0.8, roughness: 0.3 });
+  private brazierFlameMat = new THREE.MeshBasicMaterial({ color: 0xff7043 });
 
   // Smooth Camera Vectors
   private smoothedCamPos = new THREE.Vector3(0, 4, 8);
   private smoothedCamTarget = new THREE.Vector3(0, 1.5, 0);
+
+  // Throttled Stats Updates to React
+  private lastStatsEmitTime = 0;
+  private prevHp = -1;
+  private prevStamina = -1;
+  private prevRunes = -1;
+  private prevPotions = -1;
+  private prevScore = -1;
+  private prevCombo = -1;
+  private prevInvuln = false;
+  private prevParry = false;
+  private prevSprint = false;
+  private prevSword = false;
+  private prevCanDJ = false;
 
   // Configs
   public joystickConfig: JoystickConfig;
@@ -207,67 +247,148 @@ export class GameEngine {
 
     this.customModelInfo = {
       isLoaded: false,
-      name: 'Procedural Ashen Knight',
-      source: 'procedural_default',
-      hasAnimations: false,
+      name: 'Ash.glb',
+      source: 'static_url',
+      hasAnimations: true,
       animationNames: [],
-      meshCount: 14,
-      vertexCount: 960,
+      meshCount: 0,
+      vertexCount: 0,
       config: { ...modelConfig },
     };
 
-    // 1. Scene Setup
+    // 1. Scene Setup with atmospheric gothic fog
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x0d0f1a);
-    this.scene.fog = new THREE.FogExp2(0x0d0f1a, 0.016);
+    this.scene.background = new THREE.Color(0x0e0b16);
+    this.scene.fog = new THREE.FogExp2(0x0e0b16, 0.022);
 
     // 2. Camera Setup
-    const aspect = container.clientWidth / container.clientHeight;
-    this.camera = new THREE.PerspectiveCamera(55, aspect, 0.1, 140);
-    this.camera.position.set(0, 4, 8);
-    this.smoothedCamPos.set(0, 4, 8);
-    this.smoothedCamTarget.set(0, 1.5, 0);
+    const aspect = this.container.clientWidth / this.container.clientHeight || 1;
+    this.camera = new THREE.PerspectiveCamera(52, aspect, 0.1, 120);
+    this.camera.position.set(0, 4.5, 8);
 
-    // 3. Renderer Setup
+    // 3. WebGL Renderer with High-Performance Settings
     this.renderer = new THREE.WebGLRenderer({
       antialias: graphics.resolutionScale >= 1.0,
       powerPreference: 'high-performance',
+      precision: 'mediump',
+      stencil: false,
+      depth: true,
     });
-    this.renderer.setSize(container.clientWidth, container.clientHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, Math.max(1.0, graphics.resolutionScale * 1.5)));
-    this.renderer.shadowMap.enabled = graphics.shadows !== 'off';
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    this.renderer.setSize(width, height);
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.25;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
+    // Apply Graphics / Shadow Settings
+    this.applyGraphicSettings(graphics);
+
     // Attach to DOM
     this.container.appendChild(this.renderer.domElement);
-
     this.clock = new THREE.Clock();
 
-    // 4. Build Environment & Player
+    // 4. Initialize Zero-Allocation Particle Pool (64 reusable particles)
+    this.initParticlePool(64);
+
+    // 5. Build Environment & Player
     this.buildWorld();
     this.playerGroup = this.buildPlayerModel();
     this.slashTrailMesh = this.buildSlashTrail();
     this.scene.add(this.playerGroup);
     this.scene.add(this.slashTrailMesh);
 
-    // 5. Spawn Chapter 1 Enemies
+    // 6. Spawn Chapter 1 Enemies
     this.spawnChapterEnemies(1);
 
-    // 6. Handle Window Resizing
+    // 7. Handle Window Resizing
     window.addEventListener('resize', this.onWindowResize);
+  }
+
+  // Live graphic settings adjustment without reloading
+  public applyGraphicSettings(graphics: GraphicSettings) {
+    this.graphicSettings = graphics;
+
+    const dpr = window.devicePixelRatio || 1;
+    let targetRatio = 1.0;
+    if (graphics.resolutionScale >= 1.0) {
+      targetRatio = Math.min(dpr, 1.5);
+    } else if (graphics.resolutionScale >= 0.8) {
+      targetRatio = Math.min(dpr, 1.25);
+    } else {
+      targetRatio = 1.0;
+    }
+    this.renderer.setPixelRatio(targetRatio);
+
+    if (graphics.shadows === 'off') {
+      this.renderer.shadowMap.enabled = false;
+      if (this.keyLight) this.keyLight.castShadow = false;
+      if (this.groundMesh) this.groundMesh.receiveShadow = false;
+    } else if (graphics.shadows === 'low') {
+      this.renderer.shadowMap.enabled = true;
+      this.renderer.shadowMap.type = THREE.BasicShadowMap;
+      if (this.keyLight) {
+        this.keyLight.castShadow = true;
+        this.keyLight.shadow.mapSize.set(512, 512);
+      }
+      if (this.groundMesh) this.groundMesh.receiveShadow = true;
+    } else {
+      this.renderer.shadowMap.enabled = true;
+      this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      if (this.keyLight) {
+        this.keyLight.castShadow = true;
+        this.keyLight.shadow.mapSize.set(1024, 1024);
+      }
+      if (this.groundMesh) this.groundMesh.receiveShadow = true;
+    }
   }
 
   private onWindowResize = () => {
     if (!this.container) return;
     const width = this.container.clientWidth;
     const height = this.container.clientHeight;
+    if (width === 0 || height === 0) return;
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
   };
+
+  private initParticlePool(capacity: number) {
+    const sparkCount = capacity - 8;
+    for (let i = 0; i < sparkCount; i++) {
+      const mesh = new THREE.Mesh(this.sparkGeo, this.normalSparkMat);
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      this.scene.add(mesh);
+      this.particlePool.push({
+        mesh,
+        velocity: new THREE.Vector3(),
+        life: 0,
+        maxLife: 1.0,
+        active: false,
+        isRing: false,
+        baseSize: 0.06,
+      });
+    }
+
+    for (let i = 0; i < 8; i++) {
+      const mesh = new THREE.Mesh(this.ringGeo, this.runeRingMat);
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      mesh.rotation.x = -Math.PI / 2;
+      this.scene.add(mesh);
+      this.particlePool.push({
+        mesh,
+        velocity: new THREE.Vector3(),
+        life: 0,
+        maxLife: 0.5,
+        active: false,
+        isRing: true,
+        baseSize: 1.0,
+      });
+    }
+  }
 
   private buildWorld() {
     // 1. Procedural Environment Map for PBR Specular Reflections (avoids black metals)
@@ -293,46 +414,46 @@ export class GameEngine {
     }
 
     // 2. Hemisphere Ambient Light - balanced moonlight sky & dark earth ground
-    const hemiLight = new THREE.HemisphereLight(0x9cb4d8, 0x241e34, 1.35);
-    this.scene.add(hemiLight);
+    this.hemiLight = new THREE.HemisphereLight(0x9cb4d8, 0x241e34, 1.35);
+    this.scene.add(this.hemiLight);
 
     // 3. Directional Key Light (Moonlight)
-    const keyLight = new THREE.DirectionalLight(0xffeedb, 1.45);
-    keyLight.position.set(18, 32, 18);
+    this.keyLight = new THREE.DirectionalLight(0xffeedb, 1.45);
+    this.keyLight.position.set(18, 32, 18);
     if (this.graphicSettings.shadows !== 'off') {
-      keyLight.castShadow = true;
-      keyLight.shadow.mapSize.width = 1024;
-      keyLight.shadow.mapSize.height = 1024;
-      keyLight.shadow.camera.near = 0.5;
-      keyLight.shadow.camera.far = 75;
-      keyLight.shadow.camera.left = -24;
-      keyLight.shadow.camera.right = 24;
-      keyLight.shadow.camera.top = 24;
-      keyLight.shadow.camera.bottom = -24;
-      keyLight.shadow.bias = -0.0005;
+      this.keyLight.castShadow = true;
+      const mapDim = this.graphicSettings.shadows === 'high' ? 1024 : 512;
+      this.keyLight.shadow.mapSize.set(mapDim, mapDim);
+      this.keyLight.shadow.camera.near = 0.5;
+      this.keyLight.shadow.camera.far = 75;
+      this.keyLight.shadow.camera.left = -24;
+      this.keyLight.shadow.camera.right = 24;
+      this.keyLight.shadow.camera.top = 24;
+      this.keyLight.shadow.camera.bottom = -24;
+      this.keyLight.shadow.bias = -0.0005;
     }
-    this.scene.add(keyLight);
+    this.scene.add(this.keyLight);
 
     // 4. Directional Rim / Fill Light (Soft cool contrast)
-    const fillLight = new THREE.DirectionalLight(0x60a5fa, 0.7);
-    fillLight.position.set(-18, 22, -18);
-    this.scene.add(fillLight);
+    this.fillLight = new THREE.DirectionalLight(0x60a5fa, 0.7);
+    this.fillLight.position.set(-18, 22, -18);
+    this.scene.add(this.fillLight);
 
-    // 5. Ground Floor: Flagstone arena
-    const groundGeo = new THREE.PlaneGeometry(80, 80, 40, 40);
+    // 5. Ground Floor: Flagstone arena (low-poly 2x2 subdivision for minimal vertex overhead)
+    const groundGeo = new THREE.PlaneGeometry(80, 80, 2, 2);
     const groundMat = new THREE.MeshStandardMaterial({
       color: 0x23253a,
       roughness: 0.75,
       metalness: 0.2,
     });
     this.groundMat = groundMat;
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = this.graphicSettings.shadows !== 'off';
-    this.scene.add(ground);
+    this.groundMesh = new THREE.Mesh(groundGeo, groundMat);
+    this.groundMesh.rotation.x = -Math.PI / 2;
+    this.groundMesh.receiveShadow = this.graphicSettings.shadows !== 'off';
+    this.scene.add(this.groundMesh);
 
     // Courtyard runic rings
-    const circleGeo = new THREE.RingGeometry(0.2, 14, 48);
+    const circleGeo = new THREE.RingGeometry(0.2, 14, 32);
     const circleMat = new THREE.MeshBasicMaterial({
       color: 0x22d3ee,
       transparent: true,
@@ -345,7 +466,7 @@ export class GameEngine {
     ringMesh.position.y = 0.02;
     this.scene.add(ringMesh);
 
-    const outerRingGeo = new THREE.RingGeometry(18.5, 19.2, 48);
+    const outerRingGeo = new THREE.RingGeometry(18.5, 19.2, 32);
     const outerRingMat = new THREE.MeshBasicMaterial({
       color: 0x38bdf8,
       transparent: true,
@@ -361,7 +482,7 @@ export class GameEngine {
     this.arenaObstacles = [];
 
     // 6. Perimeter Cathedral Pillars & Gothic Buttresses
-    const pillarGeo = new THREE.CylinderGeometry(0.7, 0.9, 9, 8);
+    const pillarGeo = new THREE.CylinderGeometry(0.7, 0.9, 9, 6);
     const pillarCapGeo = new THREE.BoxGeometry(2.2, 0.6, 2.2);
     const stoneMat = new THREE.MeshStandardMaterial({
       color: 0x2a243e,
@@ -378,29 +499,27 @@ export class GameEngine {
     ];
 
     pillarPositions.forEach(([px, pz]) => {
-      const pillarGroup = new THREE.Group();
-      const pMesh = new THREE.Mesh(pillarGeo, stoneMat);
-      pMesh.position.y = 4.5;
-      pMesh.castShadow = true;
-      pMesh.receiveShadow = true;
-      pillarGroup.add(pMesh);
+      const pGroup = new THREE.Group();
+      const shaft = new THREE.Mesh(pillarGeo, stoneMat);
+      shaft.position.y = 4.5;
+      shaft.castShadow = true;
+      pGroup.add(shaft);
 
       const cap = new THREE.Mesh(pillarCapGeo, stoneMat);
-      cap.position.y = 9;
-      cap.castShadow = true;
-      pillarGroup.add(cap);
+      cap.position.y = 9.2;
+      pGroup.add(cap);
 
-      pillarGroup.position.set(px, 0, pz);
-      this.scene.add(pillarGroup);
+      pGroup.position.set(px, 0, pz);
+      this.scene.add(pGroup);
 
-      // Register collision capsule (pillar radius 0.8 + player capsule 0.45)
-      this.arenaObstacles.push({ x: px, z: pz, radius: 1.25 });
+      // Register collision obstacle (radius 0.85 + player capsule 0.45 = 1.30)
+      this.arenaObstacles.push({ x: px, z: pz, radius: 1.30 });
     });
 
-    // 7. Boundary Ruined Walls (North, South, East, West)
-    const wallGeoH = new THREE.BoxGeometry(44, 5, 1.5);
-    const wallGeoV = new THREE.BoxGeometry(1.5, 5, 44);
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x1d192f, roughness: 0.9 });
+    // 7. Outer Arena Perimeter Walls
+    const wallGeoH = new THREE.BoxGeometry(45, 5, 1.2);
+    const wallGeoV = new THREE.BoxGeometry(1.2, 5, 45);
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x181524, roughness: 0.9 });
     this.wallMat = wallMat;
 
     const wallNorth = new THREE.Mesh(wallGeoH, wallMat);
@@ -423,7 +542,7 @@ export class GameEngine {
     wallEast.castShadow = true;
     this.scene.add(wallEast);
 
-    // 8. Braziers with dynamic glowing fire
+    // 8. Braziers with dynamic glowing fire (reusing shared geometries and materials)
     const brazierPositions = [
       [-10, -10], [10, -10],
       [-10, 10], [10, 10],
@@ -432,29 +551,22 @@ export class GameEngine {
 
     brazierPositions.forEach(([bx, bz]) => {
       const bGroup = new THREE.Group();
-      const standGeo = new THREE.CylinderGeometry(0.35, 0.55, 1.8, 8);
-      const standMat = new THREE.MeshStandardMaterial({ color: 0x362c4a, metalness: 0.6, roughness: 0.4 });
-      const stand = new THREE.Mesh(standGeo, standMat);
+
+      const stand = new THREE.Mesh(this.brazierStandGeo, this.brazierStandMat);
       stand.position.y = 0.9;
       stand.castShadow = true;
       bGroup.add(stand);
 
-      // Bowl
-      const bowlGeo = new THREE.CylinderGeometry(0.85, 0.4, 0.5, 8);
-      const bowlMat = new THREE.MeshStandardMaterial({ color: 0x272036, metalness: 0.8, roughness: 0.3 });
-      const bowl = new THREE.Mesh(bowlGeo, bowlMat);
+      const bowl = new THREE.Mesh(this.brazierBowlGeo, this.brazierBowlMat);
       bowl.position.y = 1.9;
       bGroup.add(bowl);
 
-      // Flame Core
-      const flameGeo = new THREE.SphereGeometry(0.4, 8, 8);
-      const flameMat = new THREE.MeshBasicMaterial({ color: 0xff7043 });
-      const flame = new THREE.Mesh(flameGeo, flameMat);
+      const flame = new THREE.Mesh(this.brazierFlameGeo, this.brazierFlameMat);
       flame.position.y = 2.2;
       bGroup.add(flame);
 
-      // Point Light
-      const fireLight = new THREE.PointLight(0xff6838, 2.4, 16, 1.6);
+      // Point Light with moderate range for performance
+      const fireLight = new THREE.PointLight(0xff6838, 2.0, 14, 1.8);
       fireLight.position.set(0, 2.3, 0);
       bGroup.add(fireLight);
 
@@ -462,8 +574,6 @@ export class GameEngine {
       this.scene.add(bGroup);
 
       this.braziers.push({ light: fireLight, mesh: bGroup, x: bx, z: bz });
-
-      // Register collision capsule (brazier radius 0.6 + player capsule 0.45)
       this.arenaObstacles.push({ x: bx, z: bz, radius: 1.05 });
     });
   }
@@ -473,7 +583,6 @@ export class GameEngine {
     const group = new THREE.Group();
     this.proceduralKnightGroup = new THREE.Group();
 
-    // Dark steel & gold trimmed armor materials
     const armorMat = new THREE.MeshStandardMaterial({
       color: 0x221e33,
       metalness: 0.85,
@@ -496,7 +605,6 @@ export class GameEngine {
     this.playerTorso.castShadow = true;
     this.proceduralKnightGroup.add(this.playerTorso);
 
-    // Torso gold trim crest
     const crestGeo = new THREE.BoxGeometry(0.3, 0.5, 0.58);
     const crest = new THREE.Mesh(crestGeo, goldTrimMat);
     this.playerTorso.add(crest);
@@ -508,14 +616,12 @@ export class GameEngine {
     this.playerHead.castShadow = true;
     this.playerTorso.add(this.playerHead);
 
-    // Glowing cyan visor eye-slit
     const visorGeo = new THREE.BoxGeometry(0.42, 0.09, 0.08);
     const visorMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee });
     this.playerVisorGlow = new THREE.Mesh(visorGeo, visorMat);
     this.playerVisorGlow.position.set(0, 0.04, 0.26);
     this.playerHead.add(this.playerVisorGlow);
 
-    // Horns / Helmet Plumes
     const hornGeo = new THREE.ConeGeometry(0.08, 0.45, 5);
     const hornL = new THREE.Mesh(hornGeo, goldTrimMat);
     hornL.rotation.z = 0.5;
@@ -538,7 +644,7 @@ export class GameEngine {
     this.playerTorso.add(pauldronR);
 
     // 4. Flowing Cape
-    const capeGeo = new THREE.PlaneGeometry(0.8, 1.4, 4, 4);
+    const capeGeo = new THREE.PlaneGeometry(0.8, 1.4, 2, 2);
     const capeMat = new THREE.MeshStandardMaterial({
       color: 0x3b1c4a,
       roughness: 0.9,
@@ -557,7 +663,6 @@ export class GameEngine {
     armL.position.y = -0.35;
     this.playerLeftArm.add(armL);
 
-    // Shield
     const shieldGeo = new THREE.BoxGeometry(0.6, 0.9, 0.12);
     const shieldMat = new THREE.MeshStandardMaterial({
       color: 0x1e192c,
@@ -579,7 +684,6 @@ export class GameEngine {
     armR.position.y = -0.35;
     this.playerRightArm.add(armR);
 
-    // Runic Greatsword
     this.playerSword = new THREE.Group();
     this.playerSword.position.set(0.1, -0.65, 0.2);
 
@@ -594,7 +698,6 @@ export class GameEngine {
     this.playerSwordBlade.castShadow = true;
     this.playerSword.add(this.playerSwordBlade);
 
-    // Emissive Cyan Rune Inlay on Sword
     const runeInlay = new THREE.Mesh(
       new THREE.BoxGeometry(0.04, 1.3, 0.08),
       new THREE.MeshBasicMaterial({ color: 0x22d3ee })
@@ -602,7 +705,6 @@ export class GameEngine {
     runeInlay.position.y = 0.85;
     this.playerSwordBlade.add(runeInlay);
 
-    // Sword Crossguard & Pommel
     const guardMesh = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.08, 0.14), goldTrimMat);
     this.playerSword.add(guardMesh);
     const handleMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.35), jointMat);
@@ -638,9 +740,8 @@ export class GameEngine {
     return group;
   }
 
-  // 3D Sword Arc Slash Ribbon
   private buildSlashTrail(): THREE.Mesh {
-    const geo = new THREE.RingGeometry(1.2, 2.4, 24, 1, 0, Math.PI * 0.85);
+    const geo = new THREE.RingGeometry(1.2, 2.4, 20, 1, 0, Math.PI * 0.85);
     const mat = new THREE.MeshBasicMaterial({
       color: 0x22d3ee,
       transparent: true,
@@ -648,181 +749,85 @@ export class GameEngine {
       side: THREE.DoubleSide,
     });
     const mesh = new THREE.Mesh(geo, mat);
-    mesh.rotation.x = Math.PI / 2;
-    mesh.position.y = 1.4;
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.y = 1.0;
     return mesh;
   }
 
-  // Parallel Asset Loading System: Downloads textures and GLB files concurrently with Cache API
-  public async loadGameAssetsInParallel(
-    onProgress?: (percent: number, statusText: string) => void
-  ): Promise<boolean> {
-    try {
-      const assets = await parallelAssetLoader.loadAll(prog => {
-        onProgress?.(prog.percent, prog.statusText);
-      });
-      this.loadedAssets = assets;
-
-      // 1. Apply textures to world materials
-      if (assets.textures) {
-        if (this.groundMat) {
-          this.groundMat.map = assets.textures.stoneFloorDiffuse;
-          this.groundMat.normalMap = assets.textures.stoneFloorNormal;
-          this.groundMat.normalScale.set(0.6, 0.6);
-          this.groundMat.needsUpdate = true;
-        }
-        if (this.wallMat) {
-          this.wallMat.map = assets.textures.wallStoneDiffuse;
-          this.wallMat.needsUpdate = true;
-        }
-        if (this.stoneMat) {
-          this.stoneMat.map = assets.textures.pillarStoneDiffuse;
-          this.stoneMat.needsUpdate = true;
-        }
-        if (this.circleMat) {
-          this.circleMat.map = assets.textures.runicGlyphs;
-          this.circleMat.needsUpdate = true;
-        }
-      }
-
-      // 2. Mount hero GLB if buffer was downloaded
-      if (assets.heroGlbBuffer) {
-        onProgress?.(98, 'Parsing 3D hero skeleton and animations...');
-        await new Promise<void>(resolve => {
-          this.gltfLoader.parse(
-            assets.heroGlbBuffer!,
-            '',
-            gltf => {
-              this.setupGLTFModel(gltf, 'Ash.glb', 'static_url');
-              resolve();
-            },
-            error => {
-              console.warn('Failed to parse parallel GLB buffer:', error);
-              resolve();
-            }
-          );
-        });
-      } else {
-        // Fallback candidate probe if buffer was null
-        await this.checkAndLoadDefaultGLB(onProgress);
-      }
-
-      // 3. Pre-compile WebGL shaders on GPU to eliminate frame drops on Android
-      onProgress?.(100, 'Pre-compiling GPU shaders for Android...');
-      this.renderer.compile(this.scene, this.camera);
-
-      return true;
-    } catch (err) {
-      console.warn('Parallel asset loading error, falling back:', err);
-      return this.checkAndLoadDefaultGLB(onProgress);
-    }
-  }
-
-  // Probe and load default /models/Ash.glb (or fallback character paths)
-  public async checkAndLoadDefaultGLB(onProgress?: (percent: number, statusText: string) => void): Promise<boolean> {
-    const candidatePaths = [
-      '/models/Ash.glb',
-      '/models/ash.glb',
-      '/public/models/Ash.glb',
-      '/assets/characters/Ash.glb',
-      '/assets/characters/player.glb',
-      '/assets/characters/Player.glb',
-      '/assets/characters/character.glb',
-    ];
-
-    for (const path of candidatePaths) {
-      try {
-        const loaded = await this.loadGLBFromURL(path, path.split('/').pop() || 'Ash.glb', onProgress);
-        if (loaded) return true;
-      } catch (e) {
-        // Continue searching candidates
-      }
-    }
-    return false;
-  }
-
-  // Load GLB from URL (e.g. static assets)
-  public async loadGLBFromURL(
-    url: string,
-    fileName = 'player.glb',
-    onProgress?: (percent: number, statusText: string) => void
-  ): Promise<boolean> {
-    return new Promise(resolve => {
-      this.gltfLoader.load(
-        url,
-        gltf => {
-          this.setupGLTFModel(gltf, fileName, 'static_url');
-          onProgress?.(100, 'Hero Model Loaded');
-          resolve(true);
-        },
-        xhr => {
-          if (xhr.lengthComputable && xhr.total > 0) {
-            const pct = Math.round((xhr.loaded / xhr.total) * 100);
-            const mbLoaded = (xhr.loaded / (1024 * 1024)).toFixed(1);
-            const mbTotal = (xhr.total / (1024 * 1024)).toFixed(1);
-            onProgress?.(pct, `Loading Hero 3D Assets (${mbLoaded} MB / ${mbTotal} MB)...`);
-          } else {
-            onProgress?.(50, 'Downloading Hero 3D Assets...');
-          }
-        },
-        error => {
-          console.warn('Failed to load GLB from candidate url:', url, error);
-          resolve(false);
-        }
-      );
+  // Concurrent Asset Pipeline
+  public async loadGameAssetsInParallel(onProgress?: (pct: number, status: string) => void): Promise<LoadedGameAssets> {
+    const assets = await parallelAssetLoader.loadAll(prog => {
+      onProgress?.(prog.percent, prog.statusText);
     });
-  }
+    this.loadedAssets = assets;
 
-  // Load GLB from raw ArrayBuffer (from drag-and-drop or file upload)
-  public async loadGLBFromArrayBuffer(buffer: ArrayBuffer, fileName = 'custom_character.glb'): Promise<boolean> {
-    return new Promise((resolve, reject) => {
+    if (this.groundMat && assets.textures.stoneFloorDiffuse) {
+      const tex = assets.textures.stoneFloorDiffuse;
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(12, 12);
+      this.groundMat.map = tex;
+      if (assets.textures.stoneFloorNormal) {
+        const normTex = assets.textures.stoneFloorNormal;
+        normTex.wrapS = THREE.RepeatWrapping;
+        normTex.wrapT = THREE.RepeatWrapping;
+        normTex.repeat.set(12, 12);
+        this.groundMat.normalMap = normTex;
+      }
+      this.groundMat.needsUpdate = true;
+    }
+    if (this.wallMat && assets.textures.wallStoneDiffuse) {
+      const tex = assets.textures.wallStoneDiffuse;
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(8, 2);
+      this.wallMat.map = tex;
+      this.wallMat.needsUpdate = true;
+    }
+
+    if (assets.heroGlbBuffer) {
       this.gltfLoader.parse(
-        buffer,
+        assets.heroGlbBuffer,
         '',
         gltf => {
-          this.setupGLTFModel(gltf, fileName, 'file');
-          resolve(true);
+          this.setupGLTFModel(gltf, 'Ash (Ashen Knight - GLB)');
         },
-        error => {
-          console.error('Failed to parse uploaded GLB array buffer:', error);
-          reject(error);
+        err => {
+          console.warn('Failed to parse hero GLB buffer:', err);
         }
       );
-    });
+    }
+
+    return assets;
   }
 
-  // Parse and mount GLTF character into the player hierarchy
-  private setupGLTFModel(gltf: any, name: string, source: 'file' | 'static_url') {
-    // 1. Remove old custom model if present
+  public setupGLTFModel(gltf: any, modelName: string) {
     if (this.customModelGroup) {
       this.playerGroup.remove(this.customModelGroup);
       this.customModelGroup = null;
     }
+    if (this.animationMixer) {
+      this.animationMixer.stopAllAction();
+      this.animationMixer = null;
+    }
 
-    // 2. Hide procedural knight
     this.proceduralKnightGroup.visible = false;
-
-    // 3. Create fresh wrapper group
     this.customModelGroup = new THREE.Group();
     const model = gltf.scene;
 
-    // Compute bounding box for auto-scaling and auto-grounding
     const bbox = new THREE.Box3().setFromObject(model);
     const size = bbox.getSize(new THREE.Vector3());
     const center = bbox.getCenter(new THREE.Vector3());
 
-    // Standard target character height is 1.95 units
     const targetHeight = 1.95;
     const baseScale = size.y > 0.001 ? targetHeight / size.y : 1.0;
 
-    // Center and ground the model so feet are at y = 0
     model.position.set(-center.x * baseScale, -bbox.min.y * baseScale, -center.z * baseScale);
     model.scale.set(baseScale, baseScale, baseScale);
 
     let meshCount = 0;
     let vertexCount = 0;
 
-    // Detect bone sockets for models with weapon systems (like Ash.glb)
     let rightHandBone: THREE.Object3D | null = null;
     let hipsBone: THREE.Object3D | null = null;
     let swordHandSocket: THREE.Object3D | null = null;
@@ -853,11 +858,9 @@ export class GameEngine {
           mat.side = THREE.DoubleSide;
           if (mat.map) {
             mat.map.colorSpace = THREE.SRGBColorSpace;
-            mat.map.needsUpdate = true;
           }
           if (mat.emissiveMap) {
             mat.emissiveMap.colorSpace = THREE.SRGBColorSpace;
-            mat.emissiveMap.needsUpdate = true;
           }
           if (mat.roughness !== undefined && mat.roughness < 0.2) {
             mat.roughness = 0.25;
@@ -868,7 +871,6 @@ export class GameEngine {
       }
     });
 
-    // Parent sword to RightHand bone and sheath to Hips bone if specified in model
     if (rightHandBone && swordHandSocket) {
       (rightHandBone as THREE.Object3D).add(swordHandSocket);
     }
@@ -878,16 +880,13 @@ export class GameEngine {
     this.swordDrawnMesh = swordDrawn;
     this.swordSheathedMesh = swordSheathed;
 
-    // Initially unarmed as required: sword in sheath on hips, hands free for punches
     const drawn = this.swordDrawnMesh as any;
     const sheathed = this.swordSheathedMesh as any;
     if (drawn) drawn.visible = this.isSwordEquipped;
     if (sheathed) sheathed.visible = !this.isSwordEquipped;
 
-    // 4. Setup Skeletal Animation Mixer if animations exist
     const animNames: string[] = [];
     this.animationActions.clear();
-    this.actionClipMap.clear();
 
     if (gltf.animations && gltf.animations.length > 0) {
       this.animationMixer = new THREE.AnimationMixer(model);
@@ -897,7 +896,6 @@ export class GameEngine {
         const action = this.animationMixer!.clipAction(clip);
         this.animationActions.set(clip.name, action);
 
-        // Loop and Clamping rules
         if (
           clip.name === 'Idle' ||
           clip.name === 'Walk (mocap)' ||
@@ -911,7 +909,6 @@ export class GameEngine {
           action.clampWhenFinished = true;
         }
 
-        // Action-specific playback speeds for responsiveness
         if (clip.name === 'Idle') action.timeScale = 1.0;
         else if (clip.name === 'Walk (mocap)') action.timeScale = 1.1;
         else if (clip.name === 'Sprint') action.timeScale = 1.15;
@@ -921,47 +918,45 @@ export class GameEngine {
         else if (clip.name === 'Punch (jab)') action.timeScale = 1.8;
         else if (clip.name === 'Punch (cross)') action.timeScale = 1.8;
         else if (clip.name === 'Kick') action.timeScale = 1.8;
-        else if (clip.name.startsWith('Jumping spinning kick')) action.timeScale = 2.4;
+        else if (clip.name === 'Jumping spinning kick (c0a12a) (in place)') action.timeScale = 2.4;
         else if (clip.name === 'Sword Enter') action.timeScale = 1.6;
         else if (clip.name === 'Sword Attack') action.timeScale = 2.2;
         else if (clip.name === 'Sword Aerial Combo') action.timeScale = 1.7;
         else if (clip.name === 'Sword Dash Root Motion') action.timeScale = 2.0;
-        else if (clip.name === 'Hit Stomach') action.timeScale = 1.8;
-        else if (clip.name === 'Death') action.timeScale = 1.0;
-        else if (clip.name === 'Crawl Backward') action.timeScale = 1.3;
+        else if (clip.name === 'Hit Stomach') action.timeScale = 2.0;
+        else if (clip.name === 'Death') action.timeScale = 1.5;
+        else if (clip.name === 'Crawl Backward') action.timeScale = 1.2;
       });
 
-      // Register friendly aliases for spinning kick
-      const spinKick = this.animationActions.get('Jumping spinning kick (c0a12a) (in place)');
-      if (spinKick) {
-        this.animationActions.set('Jumping spinning kick (in place)', spinKick);
-        this.animationActions.set('Jumping spinning kick', spinKick);
-      }
-
-      // Hook animation mixer completion listener
       this.animationMixer.addEventListener('finished', (e: any) => {
-        const finishedClipName = e.action?.getClip()?.name || '';
-        this.handleAnimationFinished(finishedClipName);
+        if (e.action && e.action.getClip()) {
+          this.handleAnimationFinished(e.action.getClip().name);
+        }
       });
 
-      const initialAction = this.animationActions.get('Idle') || this.animationActions.values().next().value;
-      if (initialAction) {
-        initialAction.play();
-        this.currentAnimationAction = initialAction;
+      const idleAction = this.animationActions.get('Idle');
+      if (idleAction) {
+        idleAction.play();
+        this.currentAnimationAction = idleAction;
         this.currentAshClipName = 'Idle';
       }
-    } else {
-      this.animationMixer = null;
     }
 
     this.customModelGroup.add(model);
+    this.customModelGroup.scale.set(
+      this.modelConfig.scaleMultiplier,
+      this.modelConfig.scaleMultiplier,
+      this.modelConfig.scaleMultiplier
+    );
+    this.customModelGroup.position.y = this.modelConfig.yOffset;
+    this.customModelGroup.rotation.y = (this.modelConfig.rotationOffsetY * Math.PI) / 180;
+
     this.playerGroup.add(this.customModelGroup);
-    this.applyModelCalibration(this.modelConfig);
 
     this.customModelInfo = {
       isLoaded: true,
-      name,
-      source,
+      name: modelName,
+      source: 'static_url',
       hasAnimations: animNames.length > 0,
       animationNames: animNames,
       meshCount,
@@ -970,11 +965,12 @@ export class GameEngine {
     };
 
     this.callbacks.onModelInfoUpdate?.(this.customModelInfo);
+
     this.callbacks.onFloatingText({
-      id: `model_${Date.now()}`,
-      text: `3D HERO LOADED: ${name}`,
+      id: Math.random().toString(),
+      text: 'ASH.GLB ACTIVE',
       x: this.playerPosition.x,
-      y: this.playerPosition.y + 2.2,
+      y: this.playerPosition.y + 2.4,
       z: this.playerPosition.z,
       color: '#22d3ee',
       createdAt: Date.now(),
@@ -983,7 +979,6 @@ export class GameEngine {
     });
   }
 
-  // Update Model Scale, Ground Y-Offset, and Facing Angle
   public applyModelCalibration(config: ModelCalibrationConfig) {
     this.modelConfig = { ...config };
     this.customModelInfo.config = { ...config };
@@ -995,7 +990,6 @@ export class GameEngine {
     }
   }
 
-  // Reset to default procedural knight
   public resetToDefaultKnight() {
     if (this.customModelGroup) {
       this.playerGroup.remove(this.customModelGroup);
@@ -1018,10 +1012,20 @@ export class GameEngine {
     this.callbacks.onModelInfoUpdate?.(this.customModelInfo);
   }
 
-  // Spawns enemies according to chapter progression
   public spawnChapterEnemies(chapter: number) {
-    // Clear old meshes
-    this.enemyMeshes.forEach(mesh => this.scene.remove(mesh));
+    // Clear and dispose old enemy meshes
+    this.enemyMeshes.forEach(mesh => {
+      this.scene.remove(mesh);
+      mesh.traverse((child: any) => {
+        if (child.isMesh) {
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) {
+            if (Array.isArray(child.material)) child.material.forEach((m: any) => m.dispose());
+            else child.material.dispose();
+          }
+        }
+      });
+    });
     this.enemyMeshes.clear();
     this.enemies = [];
 
@@ -1135,12 +1139,10 @@ export class GameEngine {
     this.callbacks.onQuestUpdate(this.currentQuest);
   }
 
-  // Create 3D Meshes for enemies
   private createEnemyMesh(enemy: EnemyEntity) {
     const group = new THREE.Group();
 
     if (enemy.type === 'VOID_THRALL') {
-      // Swarming purple shadow fiend
       const bodyMat = new THREE.MeshStandardMaterial({
         color: 0x180d2b,
         roughness: 0.6,
@@ -1157,15 +1159,13 @@ export class GameEngine {
       head.position.set(0, 0.65, 0.1);
       torso.add(head);
 
-      // Glowing purple eyes
-      const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 6), purpleGlowMat);
+      const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.06, 4, 4), purpleGlowMat);
       eyeL.position.set(-0.12, 0.05, 0.24);
       head.add(eyeL);
-      const eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 6), purpleGlowMat);
+      const eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.06, 4, 4), purpleGlowMat);
       eyeR.position.set(0.12, 0.05, 0.24);
       head.add(eyeR);
 
-      // Twin claw blades
       const clawMat = new THREE.MeshStandardMaterial({ color: 0x9333ea, metalness: 0.9 });
       const clawL = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.7, 4), clawMat);
       clawL.rotation.x = Math.PI / 2;
@@ -1177,7 +1177,6 @@ export class GameEngine {
       clawR.position.set(0.45, -0.2, 0.35);
       torso.add(clawR);
     } else if (enemy.type === 'CORRUPTED_GUARD') {
-      // Armored Ashen Guard with Spiked Mace
       const armorMat = new THREE.MeshStandardMaterial({ color: 0x24171a, metalness: 0.8, roughness: 0.3 });
       const redGlowMat = new THREE.MeshBasicMaterial({ color: 0xff3b30 });
 
@@ -1190,15 +1189,13 @@ export class GameEngine {
       head.position.set(0, 0.85, 0);
       torso.add(head);
 
-      // Red visor slit
       const visor = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.08, 0.06), redGlowMat);
       visor.position.set(0, 0.05, 0.31);
       head.add(visor);
 
-      // Spiked Mace in Right Hand
       const maceGroup = new THREE.Group();
       maceGroup.position.set(0.7, -0.2, 0.2);
-      const maceShaft = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.2), armorMat);
+      const maceShaft = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.2, 5), armorMat);
       maceShaft.position.y = 0.5;
       maceGroup.add(maceShaft);
       const maceHead = new THREE.Mesh(new THREE.DodecahedronGeometry(0.22), redGlowMat);
@@ -1206,12 +1203,10 @@ export class GameEngine {
       maceGroup.add(maceHead);
       torso.add(maceGroup);
 
-      // Iron Tower Shield in Left Hand
       const shield = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.2, 0.1), armorMat);
       shield.position.set(-0.7, -0.1, 0.25);
       torso.add(shield);
     } else if (enemy.type === 'MALAKOR_BOSS') {
-      // Giant Abyssal Lord (2.3x scale)
       const bossArmorMat = new THREE.MeshStandardMaterial({
         color: 0x12071f,
         metalness: 0.9,
@@ -1225,33 +1220,29 @@ export class GameEngine {
       torso.castShadow = true;
       group.add(torso);
 
-      // Giant Crowned Head
       const head = new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.0, 1.0), bossArmorMat);
       head.position.set(0, 1.4, 0);
       torso.add(head);
 
-      // Spiked Abyssal Crown
       [-0.4, -0.2, 0, 0.2, 0.4].forEach(x => {
         const spike = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.6, 4), bossVoidMat);
         spike.position.set(x, 0.7, 0.1);
         head.add(spike);
       });
 
-      // Fiery Eyes & Visor
-      const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), bossEmberMat);
+      const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 6), bossEmberMat);
       eyeL.position.set(-0.25, 0.1, 0.52);
       head.add(eyeL);
-      const eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), bossEmberMat);
+      const eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 6), bossEmberMat);
       eyeR.position.set(0.25, 0.1, 0.52);
       head.add(eyeR);
 
-      // Giant Double Scythe of Embers
       const scythe = new THREE.Group();
       scythe.position.set(1.2, 0, 0.4);
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3.2), bossArmorMat);
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3.2, 6), bossArmorMat);
       pole.position.y = 0.8;
       scythe.add(pole);
-      const blade = new THREE.Mesh(new THREE.TorusGeometry(0.8, 0.08, 6, 12, Math.PI * 0.7), bossEmberMat);
+      const blade = new THREE.Mesh(new THREE.TorusGeometry(0.8, 0.08, 5, 8, Math.PI * 0.7), bossEmberMat);
       blade.position.set(0.4, 2.1, 0);
       blade.rotation.z = -0.5;
       scythe.add(blade);
@@ -1264,10 +1255,7 @@ export class GameEngine {
     this.enemyMeshes.set(enemy.id, group);
   }
 
-  // -------------------------------------------------------------
-  // ASH ANIMATION & COMBAT ENGINE
-  // -------------------------------------------------------------
-
+  // Animation Management
   public playAshAnimation(clipName: string, blendDuration = 0.12, restartIfSame = false) {
     if (!this.animationMixer) return;
     const action = this.animationActions.get(clipName);
@@ -1319,39 +1307,32 @@ export class GameEngine {
     }
   }
 
-  // 6. IDLE/WALK/SPRINT -> ATTACK (Unarmed combo sequence & Sword attack)
+  // Combat Triggers
   public triggerLightAttack() {
     if (this.isDead || this.isDodging || this.isHitStunned || this.isDrawingSword || this.isSwordDashing) return;
 
-    // 8. Air attacks
     if (!this.isGrounded) {
       this.triggerAirAttack();
       return;
     }
 
-    // 10. Sword Attack
     if (this.isSwordEquipped) {
       this.triggerSwordAttack();
       return;
     }
 
-    // Unarmed ground combo
     if (this.stats.stamina < 8) return;
 
     if (!this.isAttacking) {
       this.stats.stamina = Math.max(0, this.stats.stamina - 8);
       this.startUnarmedAttack(1);
     } else {
-      // In active attack: check combo window and input buffer
       if (this.attackAnimTime < this.comboWindowStart) {
-        // Slightly before combo window: remember via input buffer
         this.inputBufferAttack = true;
       } else if (this.attackAnimTime >= this.comboWindowStart && this.attackAnimTime <= this.comboWindowEnd) {
-        // Within combo window: advance immediately
         this.stats.stamina = Math.max(0, this.stats.stamina - 8);
         this.advanceUnarmedCombo();
       }
-      // If outside combo window: do not restart current attack
     }
   }
 
@@ -1364,7 +1345,7 @@ export class GameEngine {
 
     if (step === 1) {
       this.activeAttackClipName = 'Punch (jab)';
-      this.attackAnimDuration = 0.833 / 1.8; // ~0.46s
+      this.attackAnimDuration = 0.833 / 1.8;
       this.comboWindowStart = 0.18;
       this.comboWindowEnd = 0.42;
       this.stats.comboCount = 1;
@@ -1374,7 +1355,7 @@ export class GameEngine {
       setTimeout(() => this.performAttackHitCheck(1, false), 180);
     } else if (step === 2) {
       this.activeAttackClipName = 'Punch (cross)';
-      this.attackAnimDuration = 0.967 / 1.8; // ~0.54s
+      this.attackAnimDuration = 0.967 / 1.8;
       this.comboWindowStart = 0.20;
       this.comboWindowEnd = 0.48;
       this.stats.comboCount = 2;
@@ -1384,7 +1365,7 @@ export class GameEngine {
       setTimeout(() => this.performAttackHitCheck(2, false), 200);
     } else if (step === 3) {
       this.activeAttackClipName = 'Kick';
-      this.attackAnimDuration = 1.100 / 1.8; // ~0.61s
+      this.attackAnimDuration = 1.100 / 1.8;
       this.comboWindowStart = 0.24;
       this.comboWindowEnd = 0.55;
       this.stats.comboCount = 3;
@@ -1394,8 +1375,8 @@ export class GameEngine {
       setTimeout(() => this.performAttackHitCheck(3, false), 240);
     } else if (step === 4) {
       this.activeAttackClipName = 'Jumping spinning kick (c0a12a) (in place)';
-      this.attackAnimDuration = 3.967 / 2.4; // ~1.65s
-      this.comboWindowStart = 999; // final finisher
+      this.attackAnimDuration = 3.967 / 2.4;
+      this.comboWindowStart = 999;
       this.comboWindowEnd = 999;
       this.stats.comboCount = 4;
       this.stats.comboMultiplier = 2.0;
@@ -1422,7 +1403,6 @@ export class GameEngine {
     }
   }
 
-  // 10. SWORD ATTACK
   public triggerSwordAttack() {
     if (!this.isSwordEquipped || this.isDead || this.isDodging || this.isHitStunned || this.isDrawingSword || this.isSwordDashing) return;
     if (this.stats.stamina < 12) return;
@@ -1432,7 +1412,7 @@ export class GameEngine {
       this.isAttacking = true;
       this.activeAttackClipName = 'Sword Attack';
       this.attackAnimTime = 0;
-      this.attackAnimDuration = 1.533 / 2.2; // ~0.70s
+      this.attackAnimDuration = 1.533 / 2.2;
       this.comboWindowStart = 0.28;
       this.comboWindowEnd = 0.58;
       this.inputBufferAttack = false;
@@ -1462,7 +1442,6 @@ export class GameEngine {
     }
   }
 
-  // 8. AIR ATTACKS
   public triggerAirAttack() {
     if (this.isGrounded || this.isDead || this.isDodging || this.isHitStunned) return;
     if (this.stats.stamina < 15) return;
@@ -1473,16 +1452,14 @@ export class GameEngine {
     this.inputBufferAttack = false;
 
     if (this.isSwordEquipped) {
-      // 11. SWORD AERIAL COMBO
       this.activeAttackClipName = 'Sword Aerial Combo';
-      this.attackAnimDuration = 1.000 / 1.7; // ~0.59s
+      this.attackAnimDuration = 1.000 / 1.7;
       this.comboWindowStart = 999;
       this.comboWindowEnd = 999;
       soundManager.playSwing(1.2);
       triggerHaptic(30);
       setTimeout(() => this.performAttackHitCheck(3, false), 200);
     } else {
-      // Unarmed aerial kick
       this.activeAttackClipName = 'Jumping spinning kick (c0a12a) (in place)';
       this.attackAnimDuration = 3.967 / 2.4;
       this.comboWindowStart = 999;
@@ -1495,17 +1472,15 @@ export class GameEngine {
     this.playAshAnimation(this.activeAttackClipName, 0.06, true);
   }
 
-  // 9. SWORD ENTER & SHEATHE
   public triggerToggleSword() {
     if (this.isDead || this.isDodging || this.isHitStunned || this.isDrawingSword || this.isSwordDashing) return;
 
     if (!this.isSwordEquipped) {
-      // Draw sword with "Sword Enter"
       this.isAttacking = true;
       this.isDrawingSword = true;
       this.activeAttackClipName = 'Sword Enter';
       this.attackAnimTime = 0;
-      this.attackAnimDuration = 1.300 / 1.6; // ~0.81s
+      this.attackAnimDuration = 1.300 / 1.6;
       this.comboWindowStart = 999;
       this.comboWindowEnd = 999;
 
@@ -1513,7 +1488,6 @@ export class GameEngine {
       soundManager.playSwing(0.8);
       triggerHaptic(30);
 
-      // Equip sword to hand when hand grasps hilt in animation (~0.5s)
       setTimeout(() => {
         if (this.isDead) return;
         this.isSwordEquipped = true;
@@ -1535,7 +1509,6 @@ export class GameEngine {
         scale: 1.2,
       });
     } else {
-      // Sheathe sword
       if (this.isAttacking) return;
       this.isSwordEquipped = false;
       this.stats.isSwordEquipped = false;
@@ -1557,7 +1530,6 @@ export class GameEngine {
     }
   }
 
-  // 12. SWORD DASH
   public triggerSwordDash() {
     if (!this.isSwordEquipped || this.isDead || this.isDodging || this.isHitStunned || this.swordDashCooldownTimer > 0) return;
     if (this.stats.stamina < 20) return;
@@ -1569,7 +1541,7 @@ export class GameEngine {
     this.stats.swordDashCooldown = 1.2;
     this.activeAttackClipName = 'Sword Dash Root Motion';
     this.attackAnimTime = 0;
-    this.attackAnimDuration = 1.567 / 2.0; // ~0.78s
+    this.attackAnimDuration = 1.567 / 2.0;
     this.comboWindowStart = 999;
     this.comboWindowEnd = 999;
 
@@ -1592,7 +1564,6 @@ export class GameEngine {
     }, 250);
   }
 
-  // Heavy Cleave fallback
   public triggerHeavyCleave() {
     if (this.isSwordEquipped) {
       this.triggerSwordDash();
@@ -1611,24 +1582,26 @@ export class GameEngine {
     triggerHaptic(60);
     soundManager.playRuneBurst();
 
-    this.spawnRuneBurstParticles(this.playerPosition);
+    this.spawnRuneBurstParticles(this.playerPosition.x, this.playerPosition.z);
 
+    const px = this.playerPosition.x;
+    const pz = this.playerPosition.z;
     this.enemies.forEach(enemy => {
       if (enemy.state === 'DEAD') return;
-      const dist = this.playerPosition.distanceTo(new THREE.Vector3(enemy.x, enemy.y, enemy.z));
-      if (dist <= 6.5) {
+      const dx = enemy.x - px;
+      const dz = enemy.z - pz;
+      const distSq = dx * dx + dz * dz;
+      if (distSq <= 6.5 * 6.5) {
         this.damageEnemy(enemy, 55, true, 'RUNE BLAST!');
       }
     });
   }
 
-  // 5. ANY NORMAL STATE -> DODGE
   public triggerDodgeRoll() {
     if (this.isDead || this.isDodging || this.dodgeCooldownTimer > 0) return;
     if (this.stats.stamina < 18) return;
 
     this.stats.stamina = Math.max(0, this.stats.stamina - 18);
-    // Cancel normal movement and attacks
     this.isAttacking = false;
     this.unarmedComboStep = 0;
     this.activeAttackClipName = '';
@@ -1664,21 +1637,18 @@ export class GameEngine {
     triggerHaptic(30);
   }
 
-  // 3. IDLE/WALK/SPRINT -> JUMP & 4. AIRBORNE -> DOUBLE JUMP
   public triggerJump() {
     if (this.isDead || this.isDodging || this.isHitStunned) return;
 
     if (!this.isGrounded) {
-      // Airborne: trigger double jump if available
       if (this.doubleJumpAvailable && !this.isDoubleJumping) {
         this.triggerDoubleJump();
       }
       return;
     }
 
-    if (this.isAttacking) return; // Jump does not interrupt attack (Rule 7)
+    if (this.isAttacking) return;
 
-    // Ground jump: Jump Start
     this.isGrounded = false;
     this.isJumping = true;
     this.isDoubleJumping = false;
@@ -1700,7 +1670,6 @@ export class GameEngine {
     triggerHaptic(30);
   }
 
-  // 15. CRAWL BACKWARD
   public setCrawlActive(active: boolean) {
     this.isCrawlInputActive = active;
     this.stats.isCrawling = active;
@@ -1718,7 +1687,7 @@ export class GameEngine {
     triggerHaptic(40);
     soundManager.playPotion();
 
-    this.spawnHealParticles(this.playerPosition);
+    this.spawnHealParticles(this.playerPosition.x, this.playerPosition.y, this.playerPosition.z);
     this.callbacks.onFloatingText({
       id: Math.random().toString(),
       text: `+${this.stats.potionHealAmount} HP`,
@@ -1742,14 +1711,18 @@ export class GameEngine {
     if (this.targetLockEnemy) {
       this.targetLockEnemy = null;
     } else {
-      // Find closest alive enemy within 15 units
       let closest: EnemyEntity | null = null;
-      let minDist = 15;
+      let minDistSq = 15 * 15;
+      const px = this.playerPosition.x;
+      const pz = this.playerPosition.z;
+
       this.enemies.forEach(e => {
         if (e.state === 'DEAD') return;
-        const d = this.playerPosition.distanceTo(new THREE.Vector3(e.x, e.y, e.z));
-        if (d < minDist) {
-          minDist = d;
+        const dx = e.x - px;
+        const dz = e.z - pz;
+        const dSq = dx * dx + dz * dz;
+        if (dSq < minDistSq) {
+          minDistSq = dSq;
           closest = e;
         }
       });
@@ -1764,15 +1737,13 @@ export class GameEngine {
     triggerHaptic(25);
   }
 
-  // Attack hit registration
+  // Attack hit registration (optimized with scalar geometry)
   private performAttackHitCheck(comboIndex: number, isHeavy = false) {
-    const forward = new THREE.Vector3(
-      Math.sin(this.playerRotationY),
-      0,
-      Math.cos(this.playerRotationY)
-    ).normalize();
+    const fwdX = Math.sin(this.playerRotationY);
+    const fwdZ = Math.cos(this.playerRotationY);
 
     const range = isHeavy ? 3.8 : 2.7;
+    const rangeSq = range * range;
     const baseDamage = isHeavy ? 48 : 20 + comboIndex * 6;
 
     // Show sword arc slash
@@ -1781,24 +1752,28 @@ export class GameEngine {
     (this.slashTrailMesh.material as THREE.MeshBasicMaterial).opacity = 0.85;
 
     let hitAny = false;
+    const px = this.playerPosition.x;
+    const pz = this.playerPosition.z;
 
     this.enemies.forEach(enemy => {
       if (enemy.state === 'DEAD') return;
-      const enemyPos = new THREE.Vector3(enemy.x, enemy.y, enemy.z);
-      const toEnemy = enemyPos.clone().sub(this.playerPosition);
-      const dist = toEnemy.length();
+      const dx = enemy.x - px;
+      const dz = enemy.z - pz;
+      const distSq = dx * dx + dz * dz;
 
-      if (dist <= range) {
-        toEnemy.normalize();
-        const dot = forward.dot(toEnemy);
-        // Hit if enemy is within 120 degree cone in front of player
+      if (distSq <= rangeSq) {
+        const dist = Math.sqrt(distSq) || 0.001;
+        const toDirX = dx / dist;
+        const toDirZ = dz / dist;
+        const dot = fwdX * toDirX + fwdZ * toDirZ;
+
         if (dot > 0.25 || isHeavy) {
           hitAny = true;
           const isCrit = comboIndex === 3 || isHeavy;
           const dmg = Math.round(baseDamage * (isCrit ? 1.4 : 1.0) * this.stats.comboMultiplier);
 
           this.damageEnemy(enemy, dmg, isCrit);
-          this.spawnHitSparks(enemyPos, isCrit);
+          this.spawnHitSparks(enemy.x, enemy.y, enemy.z, isCrit);
         }
       }
     });
@@ -1815,7 +1790,6 @@ export class GameEngine {
     soundManager.playHit(isCrit);
     triggerHaptic(isCrit ? 40 : 20);
 
-    // Stagger enemy
     enemy.state = 'STAGGER';
     enemy.staggerTimer = isCrit ? 0.6 : 0.35;
 
@@ -1831,7 +1805,6 @@ export class GameEngine {
       scale: isCrit ? 1.3 : 1.0,
     });
 
-    // Boss Phase 2 Transition Check
     if (enemy.type === 'MALAKOR_BOSS' && enemy.phase === 1 && enemy.hp <= enemy.maxHp * 0.5) {
       enemy.phase = 2;
       enemy.state = 'ENRAGED';
@@ -1854,7 +1827,6 @@ export class GameEngine {
       this.stats.score += enemy.type === 'MALAKOR_BOSS' ? 1000 : enemy.type === 'CORRUPTED_GUARD' ? 250 : 100;
       this.currentQuest.currentKills += 1;
 
-      // Check Chapter completion
       if (this.currentQuest.currentKills >= this.currentQuest.requiredKills) {
         this.currentQuest.completed = true;
         if (this.currentQuest.chapter === 1) {
@@ -1873,11 +1845,9 @@ export class GameEngine {
     }
   }
 
-  // Damage player from enemy attacks
   private damagePlayer(damage: number, attackerName: string) {
     if (this.isDead || this.stats.isInvulnerable || this.stats.hp <= 0) return;
 
-    // Check Parry Stance
     if (this.stats.isParrying && this.parryTimer > 0) {
       soundManager.playParry();
       triggerHaptic(50);
@@ -1913,13 +1883,11 @@ export class GameEngine {
     });
 
     if (this.stats.hp <= 0) {
-      // 14. DEATH STATE - Highest priority, cannot be interrupted
       this.isDead = true;
       this.stats.hp = 0;
       this.playerAction = 'DEAD';
       this.primaryAnimState = 'DEATH';
 
-      // Clear all active states and velocity
       this.isAttacking = false;
       this.isDodging = false;
       this.isHitStunned = false;
@@ -1933,15 +1901,12 @@ export class GameEngine {
       this.playAshAnimation('Death', 0.05, true);
       this.callbacks.onGameOver();
     } else {
-      // 13. HIT STOMACH (DAMAGE REACTION)
-      // Prevent multiple Hit Stomach animations from stacking simultaneously
       if (!this.isHitStunned && this.hitStunTimer <= 0) {
         this.isHitStunned = true;
         this.hitStunTimer = 0.35;
         this.playerAction = 'HIT_STOMACH';
         this.primaryAnimState = 'HIT_STOMACH';
 
-        // Damage reaction interrupts attacks and normal movement
         this.isAttacking = false;
         this.unarmedComboStep = 0;
         this.activeAttackClipName = '';
@@ -1953,7 +1918,6 @@ export class GameEngine {
     }
   }
 
-  // Respawn player
   public respawn() {
     this.isDead = false;
     this.stats.hp = this.stats.maxHp;
@@ -1989,75 +1953,78 @@ export class GameEngine {
     this.spawnChapterEnemies(this.currentQuest.chapter);
   }
 
-  // Particle Emitters
-  private spawnHitSparks(pos: THREE.Vector3, isCrit: boolean) {
-    const count = isCrit ? 16 : 8;
-    const color = isCrit ? new THREE.Color(0xf59e0b) : new THREE.Color(0x67e8f9);
-    for (let i = 0; i < count; i++) {
-      const pGeo = new THREE.SphereGeometry(0.06, 4, 4);
-      const pMat = new THREE.MeshBasicMaterial({ color });
-      const p = new THREE.Mesh(pGeo, pMat);
-      p.position.set(
-        pos.x + (Math.random() - 0.5) * 0.4,
-        pos.y + 1.2 + (Math.random() - 0.5) * 0.4,
-        pos.z + (Math.random() - 0.5) * 0.4
-      );
-      this.scene.add(p);
+  // Zero-Allocation Particle Emitters (Reusing Pool)
+  private spawnHitSparks(x: number, y: number, z: number, isCrit: boolean) {
+    const count = isCrit ? 12 : 6;
+    let spawned = 0;
 
-      const vel = new THREE.Vector3(
-        (Math.random() - 0.5) * 6,
-        Math.random() * 5 + 2,
-        (Math.random() - 0.5) * 6
-      );
-      this.particles.push({ mesh: p, velocity: vel, life: 0, maxLife: 0.35, color, size: 0.06 });
+    for (let i = 0; i < this.particlePool.length && spawned < count; i++) {
+      const p = this.particlePool[i];
+      if (!p.active && !p.isRing) {
+        p.active = true;
+        p.life = 0;
+        p.maxLife = 0.35;
+        p.baseSize = isCrit ? 0.08 : 0.05;
+        p.mesh.material = isCrit ? this.critSparkMat : this.normalSparkMat;
+        p.mesh.position.set(
+          x + (Math.random() - 0.5) * 0.4,
+          y + 1.2 + (Math.random() - 0.5) * 0.4,
+          z + (Math.random() - 0.5) * 0.4
+        );
+        p.velocity.set(
+          (Math.random() - 0.5) * 6,
+          Math.random() * 5 + 2,
+          (Math.random() - 0.5) * 6
+        );
+        p.mesh.scale.setScalar(p.baseSize);
+        p.mesh.visible = true;
+        spawned++;
+      }
     }
   }
 
-  private spawnRuneBurstParticles(pos: THREE.Vector3) {
-    const ringGeo = new THREE.RingGeometry(0.2, 0.6, 24);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: 0x22d3ee,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.9,
-    });
-    const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.set(pos.x, 0.1, pos.z);
-    this.scene.add(ring);
-
-    this.particles.push({
-      mesh: ring,
-      velocity: new THREE.Vector3(0, 0, 0),
-      life: 0,
-      maxLife: 0.5,
-      color: new THREE.Color(0x22d3ee),
-      size: 1.0,
-    });
-  }
-
-  private spawnHealParticles(pos: THREE.Vector3) {
-    for (let i = 0; i < 12; i++) {
-      const pGeo = new THREE.SphereGeometry(0.08, 4, 4);
-      const pMat = new THREE.MeshBasicMaterial({ color: 0x4ade80 });
-      const p = new THREE.Mesh(pGeo, pMat);
-      const angle = (i / 12) * Math.PI * 2;
-      p.position.set(pos.x + Math.cos(angle) * 0.8, 0.2, pos.z + Math.sin(angle) * 0.8);
-      this.scene.add(p);
-      this.particles.push({
-        mesh: p,
-        velocity: new THREE.Vector3(Math.cos(angle) * 0.4, 2.5, Math.sin(angle) * 0.4),
-        life: 0,
-        maxLife: 0.7,
-        color: new THREE.Color(0x4ade80),
-        size: 0.08,
-      });
+  private spawnRuneBurstParticles(x: number, z: number) {
+    for (let i = 0; i < this.particlePool.length; i++) {
+      const p = this.particlePool[i];
+      if (!p.active && p.isRing) {
+        p.active = true;
+        p.life = 0;
+        p.maxLife = 0.5;
+        p.baseSize = 1.0;
+        p.mesh.position.set(x, 0.1, z);
+        p.mesh.scale.set(1, 1, 1);
+        (p.mesh.material as THREE.MeshBasicMaterial).opacity = 0.9;
+        p.mesh.visible = true;
+        break;
+      }
     }
   }
 
-  // Main Loop Update
+  private spawnHealParticles(x: number, y: number, z: number) {
+    let spawned = 0;
+    for (let i = 0; i < this.particlePool.length && spawned < 10; i++) {
+      const p = this.particlePool[i];
+      if (!p.active && !p.isRing) {
+        p.active = true;
+        p.life = 0;
+        p.maxLife = 0.65;
+        p.baseSize = 0.07;
+        p.mesh.material = this.healSparkMat;
+
+        const angle = (spawned / 10) * Math.PI * 2;
+        p.mesh.position.set(x + Math.cos(angle) * 0.8, y + 0.2, z + Math.sin(angle) * 0.8);
+        p.velocity.set(Math.cos(angle) * 0.4, 2.4, Math.sin(angle) * 0.4);
+        p.mesh.scale.setScalar(p.baseSize);
+        p.mesh.visible = true;
+        spawned++;
+      }
+    }
+  }
+
+  // Unified Authoritative Game Loop
   public update(delta: number) {
-    const clampedDelta = Math.min(delta, 0.1);
+    // 1. Clamped delta prevents physics/teleport anomalies during backgrounding or frame drops
+    const clampedDelta = Math.min(delta, 0.05);
     const animTime = this.clock.getElapsedTime();
 
     // FPS calculation
@@ -2069,13 +2036,12 @@ export class GameEngine {
       this.lastFpsTime = now;
     }
 
-    // 1. Update Cooldowns, Timers & Stamina
+    // 2. Update Cooldowns, Timers & Stamina
     if (this.stats.stamina < this.stats.maxStamina) {
       const regenRate = this.stats.isSprinting ? 0 : 18;
       this.stats.stamina = Math.min(this.stats.maxStamina, this.stats.stamina + regenRate * clampedDelta);
     }
 
-    // Cooldowns
     this.dodgeCooldownTimer = Math.max(0, this.dodgeCooldownTimer - clampedDelta);
     this.stats.dodgeCooldown = this.dodgeCooldownTimer;
     this.swordDashCooldownTimer = Math.max(0, this.swordDashCooldownTimer - clampedDelta);
@@ -2112,7 +2078,6 @@ export class GameEngine {
     if (this.isAttacking) {
       this.attackAnimTime += clampedDelta;
 
-      // Check if buffered attack can fire inside combo window
       if (
         this.inputBufferAttack &&
         !this.comboAdvanced &&
@@ -2126,7 +2091,6 @@ export class GameEngine {
         }
       }
 
-      // Check attack duration expiry
       if (this.attackAnimTime >= this.attackAnimDuration) {
         this.isAttacking = false;
         this.isDrawingSword = false;
@@ -2146,7 +2110,7 @@ export class GameEngine {
       }
     }
 
-    // 2. Locomotion & Physics
+    // 3. Locomotion & Direction
     const isSprint = (this.sprintToggled || this.inputVector.magnitude >= this.joystickConfig.sprintThreshold) && this.stats.stamina > 5;
     this.stats.isSprinting = isSprint && this.inputVector.magnitude > 0.2 && !this.isCrawlInputActive;
 
@@ -2168,11 +2132,9 @@ export class GameEngine {
       this.playerVelocity.x *= 0.96;
       this.playerVelocity.z *= 0.96;
     } else if (this.isAttacking && this.isGrounded) {
-      // Clamp/stop movement during ground attack strike
       this.playerVelocity.x *= 0.3;
       this.playerVelocity.z *= 0.3;
     } else if (this.isCrawlInputActive && this.isGrounded) {
-      // Slow backward movement away from facing direction
       const crawlSpeed = 2.0;
       this.playerVelocity.x = Math.sin(this.playerRotationY) * crawlSpeed;
       this.playerVelocity.z = Math.cos(this.playerRotationY) * crawlSpeed;
@@ -2182,12 +2144,6 @@ export class GameEngine {
         const inY = this.inputVector.y;
         const camYaw = this.cameraYaw;
 
-        // Camera-relative movement vector
-        // In Three.js coordinate system: camera looks toward -Z at yaw 0
-        // Pushing UP (inY > 0) -> move forward (-Z)
-        // Pushing DOWN (inY < 0) -> move backward (+Z)
-        // Pushing RIGHT (inX > 0) -> move right (+X)
-        // Pushing LEFT (inX < 0) -> move left (-X)
         const moveDirX = inX * Math.cos(camYaw) - inY * Math.sin(camYaw);
         const moveDirZ = -inX * Math.sin(camYaw) - inY * Math.cos(camYaw);
 
@@ -2209,7 +2165,7 @@ export class GameEngine {
       }
     }
 
-    // Gravity & Vertical Physics
+    // 4. Gravity & Ground Physics
     if (!this.isGrounded) {
       this.playerVy -= 18.0 * clampedDelta;
       this.playerPosition.y += this.playerVy * clampedDelta;
@@ -2224,7 +2180,6 @@ export class GameEngine {
 
         if (wasAirborne) {
           if (this.stats.isSprinting && this.inputVector.magnitude > 0.2) {
-            // Cancel landing directly into sprint
             this.isLanding = false;
           } else if (!this.isAttacking && !this.isDodging && !this.isHitStunned) {
             this.isLanding = true;
@@ -2233,7 +2188,6 @@ export class GameEngine {
         }
       }
     } else {
-      // Keep grounded character anchored to floor
       this.playerPosition.y = 0;
       this.playerVy = 0;
     }
@@ -2242,7 +2196,7 @@ export class GameEngine {
     this.playerPosition.x += this.playerVelocity.x * clampedDelta;
     this.playerPosition.z += this.playerVelocity.z * clampedDelta;
 
-    // Obstacle capsule collision (Pillars & Braziers) with tangent wall-sliding
+    // Obstacle capsule collision (tangent wall-sliding)
     for (let i = 0; i < this.arenaObstacles.length; i++) {
       const obs = this.arenaObstacles[i];
       const dx = this.playerPosition.x - obs.x;
@@ -2253,10 +2207,8 @@ export class GameEngine {
         const dist = Math.sqrt(distSq);
         const nx = dx / dist;
         const nz = dz / dist;
-        // Push capsule out to surface
         this.playerPosition.x = obs.x + nx * minD;
         this.playerPosition.z = obs.z + nz * minD;
-        // Remove normal component of velocity for smooth sliding
         const dot = this.playerVelocity.x * nx + this.playerVelocity.z * nz;
         if (dot < 0) {
           this.playerVelocity.x -= dot * nx;
@@ -2265,7 +2217,7 @@ export class GameEngine {
       }
     }
 
-    // Arena boundary limits (Inside perimeter stone walls)
+    // Arena boundary limits
     const arenaLimit = 20.2;
     if (this.playerPosition.x < -arenaLimit) {
       this.playerPosition.x = -arenaLimit;
@@ -2282,7 +2234,7 @@ export class GameEngine {
       if (this.playerVelocity.z > 0) this.playerVelocity.z = 0;
     }
 
-    // Failsafe: character can never fall into void
+    // Ground anchor failsafe
     if (this.playerPosition.y < 0) {
       this.playerPosition.y = 0;
       this.playerVy = 0;
@@ -2293,37 +2245,31 @@ export class GameEngine {
     this.playerGroup.position.copy(this.playerPosition);
     this.playerGroup.rotation.y = this.playerRotationY;
 
-    // 3. PRIORITY-BASED SKELETAL ANIMATION CONTROLLER
-    // "Death" > "Dodge_Roll" > "Hit Stomach" > "Attack/Sword Attack" > "Jump/Air" > "Sprint" > "Walk" > "Idle"
+    // 5. Priority-Based Skeletal Animation Controller
     let selectedClipName = 'Idle';
     let blendDuration = 0.12;
 
     if (this.isDead || this.stats.hp <= 0) {
-      // 1. DEATH (Top Priority)
       selectedClipName = 'Death';
       blendDuration = 0.05;
       this.primaryAnimState = 'DEATH';
       this.playerAction = 'DEAD';
     } else if (this.isDodging) {
-      // 2. DODGE ROLL
       selectedClipName = 'Ninja Jump Double';
       blendDuration = 0.05;
       this.primaryAnimState = 'DODGE_ROLL';
       this.playerAction = 'DODGE_ROLL';
     } else if (this.isHitStunned) {
-      // 3. HIT STOMACH
       selectedClipName = 'Hit Stomach';
       blendDuration = 0.05;
       this.primaryAnimState = 'HIT_STOMACH';
       this.playerAction = 'HIT_STOMACH';
     } else if (this.isAttacking && this.activeAttackClipName) {
-      // 4. ATTACK / SWORD ATTACK
       selectedClipName = this.activeAttackClipName;
       blendDuration = 0.06;
       this.primaryAnimState = 'ATTACK';
       this.playerAction = 'ATTACK_1';
     } else if (!this.isGrounded || this.isJumping || this.isDoubleJumping || this.isLanding) {
-      // 5. JUMP / AIRBORNE
       if (this.isDoubleJumping) {
         selectedClipName = 'Ninja Jump Double';
         blendDuration = 0.06;
@@ -2337,25 +2283,21 @@ export class GameEngine {
       this.primaryAnimState = 'JUMP';
       this.playerAction = 'JUMP';
     } else if (this.isCrawlInputActive) {
-      // 15. CRAWL BACKWARD
       selectedClipName = 'Crawl Backward';
       blendDuration = 0.12;
       this.primaryAnimState = 'CRAWL_BACKWARD';
       this.playerAction = 'CRAWL_BACKWARD';
     } else if (this.stats.isSprinting && this.inputVector.magnitude > 0.05) {
-      // 6. SPRINT
       selectedClipName = 'Sprint';
       blendDuration = 0.10;
       this.primaryAnimState = 'SPRINT';
       this.playerAction = 'SPRINT';
     } else if (this.inputVector.magnitude > 0.05) {
-      // 7. WALK
       selectedClipName = 'Walk (mocap)';
       blendDuration = 0.12;
       this.primaryAnimState = 'WALK';
       this.playerAction = 'RUN';
     } else {
-      // 8. IDLE
       selectedClipName = 'Idle';
       blendDuration = 0.14;
       this.primaryAnimState = 'IDLE';
@@ -2366,8 +2308,6 @@ export class GameEngine {
       this.animationMixer.update(clampedDelta);
       this.playAshAnimation(selectedClipName, blendDuration);
     } else if (this.customModelGroup) {
-      // Procedural animations for custom static mesh models
-      const animTime = this.clock.getElapsedTime();
       const baseRotY = (this.modelConfig.rotationOffsetY * Math.PI) / 180;
       const currentAction = this.playerAction as string;
 
@@ -2396,8 +2336,6 @@ export class GameEngine {
         this.customModelGroup.rotation.y = baseRotY;
       }
     } else {
-      // Default procedural knight articulation
-      const animTime = this.clock.getElapsedTime();
       const currentAction = this.playerAction as string;
       if (currentAction === 'RUN' || currentAction === 'SPRINT') {
         const strideFreq = currentAction === 'SPRINT' ? 14 : 9;
@@ -2436,7 +2374,10 @@ export class GameEngine {
       slashMat.opacity = Math.max(0, slashMat.opacity - 4.0 * clampedDelta);
     }
 
-    // 4. Enemy AI Update
+    // 6. Enemy AI Update (optimized zero-allocation vector math)
+    const px = this.playerPosition.x;
+    const pz = this.playerPosition.z;
+
     this.enemies.forEach(enemy => {
       if (enemy.state === 'DEAD') {
         const mesh = this.enemyMeshes.get(enemy.id);
@@ -2447,32 +2388,30 @@ export class GameEngine {
         return;
       }
 
-      const enemyPos = new THREE.Vector3(enemy.x, enemy.y, enemy.z);
-      const toPlayer = this.playerPosition.clone().sub(enemyPos);
-      const dist = toPlayer.length();
+      const dx = px - enemy.x;
+      const dz = pz - enemy.z;
+      const distSq = dx * dx + dz * dz;
 
-      // Enemy Stagger Recovery
       if (enemy.state === 'STAGGER') {
         enemy.staggerTimer -= clampedDelta;
         if (enemy.staggerTimer <= 0) enemy.state = 'IDLE';
         return;
       }
 
-      // AI Decision
-      if (dist < 18) {
-        toPlayer.normalize();
-        enemy.rotationY = Math.atan2(toPlayer.x, toPlayer.z);
+      if (distSq < 18 * 18) {
+        const dist = Math.sqrt(distSq) || 0.001;
+        const toDirX = dx / dist;
+        const toDirZ = dz / dist;
+        enemy.rotationY = Math.atan2(toDirX, toDirZ);
 
         const attackRange = enemy.type === 'MALAKOR_BOSS' ? 4.5 : 2.2;
 
         if (dist > attackRange) {
-          // Chase player
           const speed = enemy.type === 'VOID_THRALL' ? 4.0 : enemy.type === 'MALAKOR_BOSS' ? 3.2 : 2.6;
-          enemy.x += toPlayer.x * speed * clampedDelta;
-          enemy.z += toPlayer.z * speed * clampedDelta;
+          enemy.x += toDirX * speed * clampedDelta;
+          enemy.z += toDirZ * speed * clampedDelta;
           enemy.state = 'CHASE';
         } else {
-          // Attack windup & attack execution
           enemy.attackTimer += clampedDelta;
           const windupDuration = enemy.type === 'MALAKOR_BOSS' ? 1.4 : 1.1;
 
@@ -2484,7 +2423,6 @@ export class GameEngine {
         }
       }
 
-      // Update enemy mesh position & rotation
       const eMesh = this.enemyMeshes.get(enemy.id);
       if (eMesh) {
         eMesh.position.set(enemy.x, enemy.y, enemy.z);
@@ -2492,63 +2430,98 @@ export class GameEngine {
       }
     });
 
-    // 5. Update Camera Position (Orbit & Target Lock)
+    // 7. Update Camera Position (Zero-allocation scalar math)
     if (this.targetLockEnemy && this.targetLockEnemy.state !== 'DEAD') {
-      const enemyPos = new THREE.Vector3(this.targetLockEnemy.x, this.targetLockEnemy.y, this.targetLockEnemy.z);
-      const dir = enemyPos.clone().sub(this.playerPosition).normalize();
-      this.cameraYaw = Math.atan2(-dir.x, -dir.z);
+      const ldx = this.targetLockEnemy.x - px;
+      const ldz = this.targetLockEnemy.z - pz;
+      this.cameraYaw = Math.atan2(-ldx, -ldz);
     }
 
-    // Clamp pitch to safe bounds so camera never clips into the floor
     this.cameraPitch = THREE.MathUtils.clamp(this.cameraPitch, -0.10, 0.82);
 
-    const targetCamX = this.playerPosition.x + Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDistance;
+    const targetCamX = px + Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDistance;
     const targetCamY = Math.max(0.75, this.playerPosition.y + Math.sin(this.cameraPitch) * this.cameraDistance + 1.8);
-    const targetCamZ = this.playerPosition.z + Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDistance;
+    const targetCamZ = pz + Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDistance;
 
-    // Smooth exponential lerp (0.16) for cinematic smoothness without lag
     this.smoothedCamPos.x += (targetCamX - this.smoothedCamPos.x) * 0.16;
     this.smoothedCamPos.y += (targetCamY - this.smoothedCamPos.y) * 0.16;
     this.smoothedCamPos.z += (targetCamZ - this.smoothedCamPos.z) * 0.16;
 
     const targetLookY = this.playerPosition.y + 1.45;
-    this.smoothedCamTarget.x += (this.playerPosition.x - this.smoothedCamTarget.x) * 0.16;
+    this.smoothedCamTarget.x += (px - this.smoothedCamTarget.x) * 0.16;
     this.smoothedCamTarget.y += (targetLookY - this.smoothedCamTarget.y) * 0.16;
-    this.smoothedCamTarget.z += (this.playerPosition.z - this.smoothedCamTarget.z) * 0.16;
+    this.smoothedCamTarget.z += (pz - this.smoothedCamTarget.z) * 0.16;
 
     this.camera.position.copy(this.smoothedCamPos);
     this.camera.lookAt(this.smoothedCamTarget);
 
-    // 6. Flickering Brazier Fire
+    // 8. Flickering Brazier Fire
     this.braziers.forEach((b, i) => {
-      b.light.intensity = 1.8 + Math.sin(animTime * 8 + i * 2) * 0.4 + (Math.random() - 0.5) * 0.2;
+      b.light.intensity = 1.8 + Math.sin(animTime * 8 + i * 2) * 0.4;
     });
 
-    // 7. Update Particles
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
+    // 9. Update Reusable Particle Pool
+    for (let i = 0; i < this.particlePool.length; i++) {
+      const p = this.particlePool[i];
+      if (!p.active) continue;
+
       p.life += clampedDelta;
       if (p.life >= p.maxLife) {
-        this.scene.remove(p.mesh);
-        this.particles.splice(i, 1);
+        p.active = false;
+        p.mesh.visible = false;
         continue;
       }
 
-      p.mesh.position.addScaledVector(p.velocity, clampedDelta);
-      if (p.mesh.geometry.type === 'RingGeometry') {
-        const scale = 1.0 + (p.life / p.maxLife) * 12.0;
+      if (p.isRing) {
+        const progress = p.life / p.maxLife;
+        const scale = 1.0 + progress * 12.0;
         p.mesh.scale.set(scale, scale, 1);
-        (p.mesh.material as THREE.MeshBasicMaterial).opacity = 1.0 - p.life / p.maxLife;
+        (p.mesh.material as THREE.MeshBasicMaterial).opacity = 1.0 - progress;
       } else {
         p.velocity.y -= 9.8 * clampedDelta;
+        p.mesh.position.x += p.velocity.x * clampedDelta;
+        p.mesh.position.y += p.velocity.y * clampedDelta;
+        p.mesh.position.z += p.velocity.z * clampedDelta;
+
         const fade = 1.0 - p.life / p.maxLife;
-        p.mesh.scale.setScalar(p.size * fade);
+        p.mesh.scale.setScalar(p.baseSize * fade);
       }
     }
 
-    // 8. Render Scene
+    // 10. Render Scene
     this.renderer.render(this.scene, this.camera);
-    this.callbacks.onStatsUpdate({ ...this.stats });
+
+    // 11. Throttled Stats Update to React (emits only on changes, at ~16 Hz max)
+    const nowMs = performance.now();
+    const statsChanged =
+      Math.abs(this.stats.hp - this.prevHp) > 0.4 ||
+      Math.abs(this.stats.stamina - this.prevStamina) > 0.8 ||
+      Math.abs(this.stats.runes - this.prevRunes) > 0.8 ||
+      this.stats.potions !== this.prevPotions ||
+      this.stats.score !== this.prevScore ||
+      this.stats.comboCount !== this.prevCombo ||
+      this.stats.isInvulnerable !== this.prevInvuln ||
+      this.stats.isParrying !== this.prevParry ||
+      this.stats.isSprinting !== this.prevSprint ||
+      this.stats.isSwordEquipped !== this.prevSword ||
+      this.stats.canDoubleJump !== this.prevCanDJ;
+
+    if (statsChanged && nowMs - this.lastStatsEmitTime >= 60) {
+      this.lastStatsEmitTime = nowMs;
+      this.prevHp = this.stats.hp;
+      this.prevStamina = this.stats.stamina;
+      this.prevRunes = this.stats.runes;
+      this.prevPotions = this.stats.potions;
+      this.prevScore = this.stats.score;
+      this.prevCombo = this.stats.comboCount;
+      this.prevInvuln = this.stats.isInvulnerable;
+      this.prevParry = this.stats.isParrying;
+      this.prevSprint = this.stats.isSprinting;
+      this.prevSword = this.stats.isSwordEquipped;
+      this.prevCanDJ = this.stats.canDoubleJump;
+
+      this.callbacks.onStatsUpdate({ ...this.stats });
+    }
   }
 
   public start() {
@@ -2578,6 +2551,32 @@ export class GameEngine {
     parallelAssetLoader.abort();
     soundManager.stopAmbientMusic();
     window.removeEventListener('resize', this.onWindowResize);
+
+    // Dispose all pooled particle meshes
+    this.particlePool.forEach(p => {
+      this.scene.remove(p.mesh);
+    });
+    this.particlePool = [];
+    this.sparkGeo.dispose();
+    this.ringGeo.dispose();
+    this.critSparkMat.dispose();
+    this.normalSparkMat.dispose();
+    this.healSparkMat.dispose();
+    this.runeRingMat.dispose();
+
+    // Dispose Brazier shared geometry
+    this.brazierStandGeo.dispose();
+    this.brazierBowlGeo.dispose();
+    this.brazierFlameGeo.dispose();
+    this.brazierStandMat.dispose();
+    this.brazierBowlMat.dispose();
+    this.brazierFlameMat.dispose();
+
+    if (this.groundMat) this.groundMat.dispose();
+    if (this.wallMat) this.wallMat.dispose();
+    if (this.stoneMat) this.stoneMat.dispose();
+    if (this.circleMat) this.circleMat.dispose();
+
     if (this.renderer && this.renderer.domElement && this.container) {
       this.container.removeChild(this.renderer.domElement);
     }

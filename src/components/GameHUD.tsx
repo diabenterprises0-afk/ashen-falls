@@ -20,7 +20,7 @@ interface GameHUDProps {
   onOpenPause: () => void;
 }
 
-export const GameHUD: React.FC<GameHUDProps> = ({
+export const GameHUD: React.FC<GameHUDProps> = React.memo(({
   stats,
   quest,
   boss,
@@ -184,4 +184,4 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       </div>
     </div>
   );
-};
+});

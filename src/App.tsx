@@ -166,7 +166,7 @@ export const App: React.FC = () => {
       setSettings(newSettings);
       saveGameSettings(newSettings);
       if (engineRef.current) {
-        engineRef.current.graphicSettings = newGraphics;
+        engineRef.current.applyGraphicSettings(newGraphics);
       }
     },
     [settings]

@@ -32,7 +32,7 @@ interface TouchCombatControlsProps {
   className?: string;
 }
 
-export const TouchCombatControls: React.FC<TouchCombatControlsProps> = ({
+export const TouchCombatControls: React.FC<TouchCombatControlsProps> = React.memo(({
   stats,
   isLockedOn,
   onLightAttack,
@@ -259,4 +259,4 @@ export const TouchCombatControls: React.FC<TouchCombatControlsProps> = ({
       </div>
     </div>
   );
-};
+});
