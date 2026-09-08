@@ -20,6 +20,8 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = memo(({
   const [isActive, setIsActive] = useState(false);
   const [isSprinting, setIsSprinting] = useState(false);
   const isSprintingRef = useRef(false);
+  const anchorOffsetRef = useRef({ x: 0, y: 0 });
+  const [anchorStyle, setAnchorStyle] = useState({ x: 0, y: 0 });
 
   // Runtime vector tracking (zero allocation)
   const currentVectorRef = useRef({ x: 0, y: 0, magnitude: 0 });
@@ -33,6 +35,9 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = memo(({
     setIsActive(false);
     setIsSprinting(false);
     isSprintingRef.current = false;
+    anchorOffsetRef.current = { x: 0, y: 0 };
+    setAnchorStyle({ x: 0, y: 0 });
+
     if (knobRef.current) {
       knobRef.current.style.transform = 'translate3d(0px, 0px, 0)';
     }
@@ -44,11 +49,12 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = memo(({
 
   // Compute vector from screen touch coordinates relative to base center
   const processTouch = useCallback(
-    (clientX: number, clientY: number) => {
+    (clientX: number, clientY: number, customAnchor?: { x: number; y: number }) => {
       if (!baseRef.current) return;
       const rect = baseRef.current.getBoundingClientRect();
-      const centerX = rect.left + rect.width / 2;
-      const centerY = rect.top + rect.height / 2;
+      const anchor = customAnchor || anchorOffsetRef.current;
+      const centerX = rect.left + rect.width / 2 + anchor.x;
+      const centerY = rect.top + rect.height / 2 + anchor.y;
 
       const dx = clientX - centerX;
       const dy = clientY - centerY;
@@ -135,10 +141,31 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = memo(({
       // safe fallback
     }
 
+    let initialAnchor = { x: 0, y: 0 };
+    if (config.dynamicAnchor && baseRef.current) {
+      const rect = baseRef.current.getBoundingClientRect();
+      const defaultCenterX = rect.left + rect.width / 2;
+      const defaultCenterY = rect.top + rect.height / 2;
+      const maxOffset = maxRadius * 0.75;
+      const rawOffsetX = e.clientX - defaultCenterX;
+      const rawOffsetY = e.clientY - defaultCenterY;
+      const offsetDist = Math.hypot(rawOffsetX, rawOffsetY);
+
+      if (offsetDist > 0) {
+        const clampedDist = Math.min(maxOffset, offsetDist);
+        initialAnchor = {
+          x: (rawOffsetX / offsetDist) * clampedDist,
+          y: (rawOffsetY / offsetDist) * clampedDist,
+        };
+      }
+    }
+
+    anchorOffsetRef.current = initialAnchor;
+    setAnchorStyle(initialAnchor);
     setIsActive(true);
     if (config.haptics) triggerHaptic(12);
 
-    processTouch(e.clientX, e.clientY);
+    processTouch(e.clientX, e.clientY, initialAnchor);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -183,6 +210,7 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = memo(({
         style={{
           width: `${baseDiameter}px`,
           height: `${baseDiameter}px`,
+          transform: config.dynamicAnchor && isActive ? `translate3d(${anchorStyle.x}px, ${anchorStyle.y}px, 0)` : 'none',
         }}
       >
         {/* Cardinal Direction Notches */}
