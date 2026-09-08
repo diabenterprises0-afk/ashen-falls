@@ -423,12 +423,15 @@ export class GameEngine {
       console.warn('Failed to build PMREM environment:', e);
     }
 
-    // 2. Hemisphere Ambient Light - balanced moonlight sky & dark earth ground
-    this.hemiLight = new THREE.HemisphereLight(0x9cb4d8, 0x241e34, 1.35);
+    // 2. Hemisphere Ambient Light & Ambient Light - balanced moonlight sky & warm ground fill
+    this.hemiLight = new THREE.HemisphereLight(0xdce7ff, 0x4a4268, 1.85);
     this.scene.add(this.hemiLight);
 
+    const ambientLight = new THREE.AmbientLight(0x8da2cc, 0.95);
+    this.scene.add(ambientLight);
+
     // 3. Directional Key Light (Moonlight)
-    this.keyLight = new THREE.DirectionalLight(0xffeedb, 1.45);
+    this.keyLight = new THREE.DirectionalLight(0xffeedb, 1.65);
     this.keyLight.position.set(20, 36, 20);
     if (this.graphicSettings.shadows !== 'off') {
       this.keyLight.castShadow = true;
@@ -873,10 +876,13 @@ export class GameEngine {
           if (mat.emissiveMap) {
             mat.emissiveMap.colorSpace = THREE.SRGBColorSpace;
           }
-          if (mat.roughness !== undefined && mat.roughness < 0.2) {
-            mat.roughness = 0.3;
+          if (mat.roughness !== undefined && mat.roughness < 0.35) {
+            mat.roughness = 0.35;
           }
-          mat.envMapIntensity = this.graphicSettings.lowEndMode ? 0.6 : 1.25;
+          if (mat.metalness !== undefined && mat.metalness > 0.6) {
+            mat.metalness = 0.5;
+          }
+          mat.envMapIntensity = 1.2;
           mat.needsUpdate = true;
         }
       }
