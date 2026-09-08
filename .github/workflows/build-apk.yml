@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - master
   workflow_dispatch:
 
 jobs:
@@ -50,9 +49,12 @@ jobs:
             APP_DIR=$(find "$ANDROID_DIR" -maxdepth 2 -name "build.gradle" -exec grep -l "com.android.application" {} + | head -n 1)
             if [ -n "$APP_DIR" ]; then
               APP_MODULE=$(basename $(dirname "$APP_DIR"))
-            else
-              APP_MODULE="app"
             fi
+          fi
+
+          if [ -z "$APP_MODULE" ]; then
+            echo "::error::Could not find Android application module!"
+            exit 1
           fi
 
           echo "Found Android root: $ANDROID_DIR"
