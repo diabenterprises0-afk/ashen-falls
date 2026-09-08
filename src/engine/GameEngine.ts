@@ -313,11 +313,11 @@ export class GameEngine {
     const dpr = window.devicePixelRatio || 1;
     let targetRatio = 1.0;
     if (graphics.resolutionScale >= 1.0) {
-      targetRatio = Math.min(dpr, 1.5);
-    } else if (graphics.resolutionScale >= 0.8) {
       targetRatio = Math.min(dpr, 1.25);
+    } else if (graphics.resolutionScale >= 0.8) {
+      targetRatio = Math.min(dpr, 1.0);
     } else {
-      targetRatio = 1.0;
+      targetRatio = 0.85;
     }
     this.renderer.setPixelRatio(targetRatio);
 
@@ -331,6 +331,8 @@ export class GameEngine {
       if (this.keyLight) {
         this.keyLight.castShadow = true;
         this.keyLight.shadow.mapSize.set(512, 512);
+        this.keyLight.shadow.bias = -0.0001;
+        this.keyLight.shadow.normalBias = 0.04;
       }
       if (this.groundMesh) this.groundMesh.receiveShadow = true;
     } else {
@@ -339,6 +341,8 @@ export class GameEngine {
       if (this.keyLight) {
         this.keyLight.castShadow = true;
         this.keyLight.shadow.mapSize.set(1024, 1024);
+        this.keyLight.shadow.bias = -0.0001;
+        this.keyLight.shadow.normalBias = 0.04;
       }
       if (this.groundMesh) this.groundMesh.receiveShadow = true;
     }
@@ -419,18 +423,19 @@ export class GameEngine {
 
     // 3. Directional Key Light (Moonlight)
     this.keyLight = new THREE.DirectionalLight(0xffeedb, 1.45);
-    this.keyLight.position.set(18, 32, 18);
+    this.keyLight.position.set(20, 36, 20);
     if (this.graphicSettings.shadows !== 'off') {
       this.keyLight.castShadow = true;
       const mapDim = this.graphicSettings.shadows === 'high' ? 1024 : 512;
       this.keyLight.shadow.mapSize.set(mapDim, mapDim);
-      this.keyLight.shadow.camera.near = 0.5;
-      this.keyLight.shadow.camera.far = 75;
-      this.keyLight.shadow.camera.left = -24;
-      this.keyLight.shadow.camera.right = 24;
-      this.keyLight.shadow.camera.top = 24;
-      this.keyLight.shadow.camera.bottom = -24;
-      this.keyLight.shadow.bias = -0.0005;
+      this.keyLight.shadow.camera.near = 1.0;
+      this.keyLight.shadow.camera.far = 90;
+      this.keyLight.shadow.camera.left = -32;
+      this.keyLight.shadow.camera.right = 32;
+      this.keyLight.shadow.camera.top = 32;
+      this.keyLight.shadow.camera.bottom = -32;
+      this.keyLight.shadow.bias = -0.0001;
+      this.keyLight.shadow.normalBias = 0.04;
     }
     this.scene.add(this.keyLight);
 
@@ -565,8 +570,8 @@ export class GameEngine {
       flame.position.y = 2.2;
       bGroup.add(flame);
 
-      // Point Light with moderate range for performance
-      const fireLight = new THREE.PointLight(0xff6838, 2.0, 14, 1.8);
+      // Optimized Point Light for smooth mobile 60 FPS performance
+      const fireLight = new THREE.PointLight(0xff6838, 1.2, 9, 2.0);
       fireLight.position.set(0, 2.3, 0);
       bGroup.add(fireLight);
 
@@ -1122,18 +1127,18 @@ export class GameEngine {
         name: 'Inquisitor Malakor',
         x: 0,
         y: 0,
-        z: -12,
+        z: -8,
         rotationY: Math.PI,
         hp: 350,
         maxHp: 350,
-        state: 'IDLE',
+        state: 'CHASE',
         attackTimer: 0,
         staggerTimer: 0,
         phase: 1,
       };
       this.enemies.push(boss);
       this.createEnemyMesh(boss);
-      this.callbacks.onBossStateChange(boss);
+      this.callbacks.onBossStateChange({ ...boss });
     }
 
     this.callbacks.onQuestUpdate(this.currentQuest);
@@ -1208,43 +1213,76 @@ export class GameEngine {
       torso.add(shield);
     } else if (enemy.type === 'MALAKOR_BOSS') {
       const bossArmorMat = new THREE.MeshStandardMaterial({
-        color: 0x12071f,
-        metalness: 0.9,
-        roughness: 0.15,
+        color: 0x281c3e,
+        metalness: 0.8,
+        roughness: 0.25,
       });
-      const bossEmberMat = new THREE.MeshBasicMaterial({ color: 0xff5722 });
-      const bossVoidMat = new THREE.MeshBasicMaterial({ color: 0xa855f7 });
+      const bossEmberMat = new THREE.MeshBasicMaterial({ color: 0xff4500 });
+      const bossVoidMat = new THREE.MeshBasicMaterial({ color: 0xbf5af2 });
+      const bossGoldTrimMat = new THREE.MeshStandardMaterial({
+        color: 0xd97706,
+        metalness: 0.9,
+        roughness: 0.2,
+      });
 
-      const torso = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.9, 1.0), bossArmorMat);
-      torso.position.y = 2.8;
+      // Massive Boss Torso
+      const torso = new THREE.Mesh(new THREE.BoxGeometry(1.6, 2.0, 1.1), bossArmorMat);
+      torso.position.y = 2.7;
       torso.castShadow = true;
       group.add(torso);
 
+      // Glowing Abyssal Core Light (casts localized purple radiance around boss)
+      const bossCoreLight = new THREE.PointLight(0xa855f7, 2.2, 9, 2.0);
+      bossCoreLight.position.set(0, 0.2, 0.4);
+      torso.add(bossCoreLight);
+
+      // Glowing Rune Chest Plate
+      const chestRune = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.8, 0.08), bossVoidMat);
+      chestRune.position.set(0, 0.2, 0.58);
+      torso.add(chestRune);
+
+      // Spiked Pauldrons
+      const pauldronL = new THREE.Mesh(new THREE.ConeGeometry(0.4, 0.8, 4), bossGoldTrimMat);
+      pauldronL.position.set(-1.1, 0.8, 0);
+      pauldronL.rotation.z = 0.5;
+      torso.add(pauldronL);
+
+      const pauldronR = new THREE.Mesh(new THREE.ConeGeometry(0.4, 0.8, 4), bossGoldTrimMat);
+      pauldronR.position.set(1.1, 0.8, 0);
+      pauldronR.rotation.z = -0.5;
+      torso.add(pauldronR);
+
+      // Boss Helmet & Crown of Void Spikes
       const head = new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.0, 1.0), bossArmorMat);
-      head.position.set(0, 1.4, 0);
+      head.position.set(0, 1.45, 0);
       torso.add(head);
 
-      [-0.4, -0.2, 0, 0.2, 0.4].forEach(x => {
-        const spike = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.6, 4), bossVoidMat);
-        spike.position.set(x, 0.7, 0.1);
+      [-0.45, -0.22, 0, 0.22, 0.45].forEach((x, idx) => {
+        const height = idx === 2 ? 0.9 : 0.65;
+        const spike = new THREE.Mesh(new THREE.ConeGeometry(0.12, height, 4), bossVoidMat);
+        spike.position.set(x, 0.75, 0.1);
         head.add(spike);
       });
 
-      const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 6), bossEmberMat);
+      // Menacing Glowing Ember Eyes
+      const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.13, 6, 6), bossEmberMat);
       eyeL.position.set(-0.25, 0.1, 0.52);
       head.add(eyeL);
-      const eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 6), bossEmberMat);
+      const eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.13, 6, 6), bossEmberMat);
       eyeR.position.set(0.25, 0.1, 0.52);
       head.add(eyeR);
 
+      // Giant Death Scythe
       const scythe = new THREE.Group();
-      scythe.position.set(1.2, 0, 0.4);
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3.2, 6), bossArmorMat);
-      pole.position.y = 0.8;
+      scythe.name = 'boss_scythe';
+      scythe.position.set(1.2, -0.2, 0.4);
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3.6, 6), bossArmorMat);
+      pole.position.y = 1.0;
       scythe.add(pole);
-      const blade = new THREE.Mesh(new THREE.TorusGeometry(0.8, 0.08, 5, 8, Math.PI * 0.7), bossEmberMat);
-      blade.position.set(0.4, 2.1, 0);
-      blade.rotation.z = -0.5;
+
+      const blade = new THREE.Mesh(new THREE.TorusGeometry(0.9, 0.1, 6, 12, Math.PI * 0.75), bossEmberMat);
+      blade.position.set(0.5, 2.4, 0);
+      blade.rotation.z = -0.6;
       scythe.add(blade);
       torso.add(scythe);
     }
@@ -1841,7 +1879,7 @@ export class GameEngine {
     }
 
     if (enemy.type === 'MALAKOR_BOSS') {
-      this.callbacks.onBossStateChange(enemy);
+      this.callbacks.onBossStateChange(enemy.state === 'DEAD' ? null : { ...enemy });
     }
   }
 
@@ -2398,7 +2436,10 @@ export class GameEngine {
         return;
       }
 
-      if (distSq < 18 * 18) {
+      // Boss has arena-wide aggro so he never stands lost in the fog
+      const aggroRadius = enemy.type === 'MALAKOR_BOSS' ? 50 : 18;
+
+      if (distSq < aggroRadius * aggroRadius) {
         const dist = Math.sqrt(distSq) || 0.001;
         const toDirX = dx / dist;
         const toDirZ = dz / dist;
@@ -2407,17 +2448,30 @@ export class GameEngine {
         const attackRange = enemy.type === 'MALAKOR_BOSS' ? 4.5 : 2.2;
 
         if (dist > attackRange) {
-          const speed = enemy.type === 'VOID_THRALL' ? 4.0 : enemy.type === 'MALAKOR_BOSS' ? 3.2 : 2.6;
+          const speed = enemy.type === 'VOID_THRALL' ? 4.0 : enemy.type === 'MALAKOR_BOSS' ? 3.4 : 2.6;
           enemy.x += toDirX * speed * clampedDelta;
           enemy.z += toDirZ * speed * clampedDelta;
           enemy.state = 'CHASE';
         } else {
           enemy.attackTimer += clampedDelta;
-          const windupDuration = enemy.type === 'MALAKOR_BOSS' ? 1.4 : 1.1;
+          const windupDuration = enemy.type === 'MALAKOR_BOSS' ? 1.3 : 1.1;
+
+          // Animate boss scythe windup and slash
+          if (enemy.type === 'MALAKOR_BOSS') {
+            const eMesh = this.enemyMeshes.get(enemy.id);
+            if (eMesh) {
+              const scythe = eMesh.getObjectByName('boss_scythe');
+              if (scythe) {
+                const windupProgress = enemy.attackTimer / windupDuration;
+                scythe.rotation.x = Math.sin(windupProgress * Math.PI) * 1.8;
+                scythe.rotation.z = -Math.sin(windupProgress * Math.PI) * 1.2;
+              }
+            }
+          }
 
           if (enemy.attackTimer >= windupDuration) {
             enemy.attackTimer = 0;
-            const enemyDmg = enemy.type === 'MALAKOR_BOSS' ? 32 : enemy.type === 'CORRUPTED_GUARD' ? 22 : 14;
+            const enemyDmg = enemy.type === 'MALAKOR_BOSS' ? (enemy.phase === 2 ? 40 : 30) : enemy.type === 'CORRUPTED_GUARD' ? 22 : 14;
             this.damagePlayer(enemyDmg, enemy.name);
           }
         }

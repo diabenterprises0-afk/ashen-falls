@@ -106,14 +106,38 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
           )}
         </div>
 
-        {/* Top-Center: Quest / Chapter Objective */}
-        <div className="hidden sm:flex flex-col items-center text-center glass-panel px-4 py-2 rounded-2xl border border-ashen-700/60 shadow-xl max-w-sm">
-          <span className="font-medieval text-xs font-bold text-cyan-300 tracking-wider uppercase">
-            Chapter {quest.chapter}: {quest.title}
-          </span>
-          <p className="text-[11px] text-ashen-300 mt-0.5 font-medium">
-            {quest.objective} ({quest.currentKills}/{quest.requiredKills})
-          </p>
+        {/* Top-Center: Quest / Chapter Objective & Boss Health Bar */}
+        <div className="flex flex-col items-center max-w-xs sm:max-w-md w-full px-2 pointer-events-none">
+          {/* Chapter Quest Badge */}
+          <div className="flex flex-col items-center text-center glass-panel px-3.5 py-1.5 sm:px-4 sm:py-2 rounded-2xl border border-ashen-700/60 shadow-xl w-full">
+            <span className="font-medieval text-[11px] sm:text-xs font-bold text-cyan-300 tracking-wider uppercase">
+              Chapter {quest.chapter}: {quest.title}
+            </span>
+            <p className="text-[10px] sm:text-[11px] text-ashen-300 mt-0.5 font-medium line-clamp-1">
+              {quest.objective} ({quest.currentKills}/{quest.requiredKills})
+            </p>
+          </div>
+
+          {/* Boss Health Bar (Top-Center HUD) */}
+          {boss && boss.state !== 'DEAD' && (
+            <div className="w-full glass-panel p-2 sm:p-2.5 rounded-2xl border border-red-500/80 shadow-[0_0_20px_rgba(239,68,68,0.4)] space-y-1 mt-1.5 sm:mt-2 pointer-events-none animate-fade-in bg-ashen-950/90 backdrop-blur-md">
+              <div className="flex items-center justify-between">
+                <span className="font-medieval text-[11px] sm:text-xs font-bold text-red-400 tracking-wider flex items-center gap-1.5 uppercase drop-shadow-[0_0_8px_rgba(239,68,68,0.8)]">
+                  <Skull className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-red-500 animate-pulse" />
+                  {boss.name}
+                </span>
+                <span className="text-[10px] sm:text-[11px] font-mono text-red-300 font-bold">
+                  {Math.max(0, Math.round(boss.hp))} / {boss.maxHp} HP
+                </span>
+              </div>
+              <div className="w-full h-2.5 sm:h-3 bg-ashen-950 rounded-full overflow-hidden border border-red-800/80 p-0.5">
+                <div
+                  className="h-full rounded-full transition-all duration-150 bg-gradient-to-r from-red-800 via-red-600 to-amber-500 shadow-[0_0_10px_rgba(239,68,68,0.8)]"
+                  style={{ width: `${Math.max(0, Math.min(100, (boss.hp / boss.maxHp) * 100))}%` }}
+                />
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Top-Right: Game Control Buttons (Pause & Audio) */}
@@ -124,10 +148,10 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
               triggerHaptic(10);
               onToggleMute();
             }}
-            className="w-10 h-10 rounded-xl glass-button flex items-center justify-center text-ashen-300 hover:text-cyan-300 border border-ashen-700/60 active:scale-95 transition-all shadow"
+            className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl glass-button flex items-center justify-center text-ashen-300 hover:text-cyan-300 border border-ashen-700/60 active:scale-95 transition-all shadow"
             title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
           >
-            {isMuted ? <VolumeX className="w-5 h-5 text-red-400" /> : <Volume2 className="w-5 h-5 text-cyan-300" />}
+            {isMuted ? <VolumeX className="w-4 h-4 sm:w-5 sm:h-5 text-red-400" /> : <Volume2 className="w-4 h-4 sm:w-5 sm:h-5 text-cyan-300" />}
           </button>
 
           {/* Pause Button */}
@@ -136,34 +160,13 @@ export const GameHUD: React.FC<GameHUDProps> = React.memo(({
               triggerHaptic(15);
               onOpenPause();
             }}
-            className="w-10 h-10 rounded-xl glass-button flex items-center justify-center text-ashen-200 hover:text-white border border-cyan-500/50 bg-cyan-950/40 active:scale-95 transition-all shadow-[0_0_12px_rgba(34,211,238,0.25)]"
+            className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl glass-button flex items-center justify-center text-ashen-200 hover:text-white border border-cyan-500/50 bg-cyan-950/40 active:scale-95 transition-all shadow-[0_0_12px_rgba(34,211,238,0.25)]"
             title="Pause Game"
           >
-            <Pause className="w-5 h-5 text-cyan-300" />
+            <Pause className="w-4 h-4 sm:w-5 sm:h-5 text-cyan-300" />
           </button>
         </div>
       </div>
-
-      {/* Center Top: Boss Health Bar (when boss active) */}
-      {boss && boss.state !== 'DEAD' && (
-        <div className="self-center w-full max-w-md glass-panel p-3 rounded-2xl border border-red-500/60 shadow-2xl space-y-1 my-2 pointer-events-none animate-fade-in">
-          <div className="flex items-center justify-between">
-            <span className="font-medieval text-xs font-bold text-red-400 tracking-widest flex items-center gap-1.5 uppercase">
-              <Skull className="w-4 h-4 text-red-500" />
-              {boss.name}
-            </span>
-            <span className="text-[10px] font-mono text-red-300">
-              {Math.max(0, Math.round(boss.hp))} / {boss.maxHp} HP
-            </span>
-          </div>
-          <div className="w-full h-3 bg-ashen-950 rounded-full overflow-hidden border border-red-800 p-0.5">
-            <div
-              className="h-full rounded-full transition-all duration-150 bg-gradient-to-r from-red-800 via-red-600 to-amber-500 shadow-[0_0_10px_rgba(239,68,68,0.6)]"
-              style={{ width: `${Math.max(0, Math.min(100, (boss.hp / boss.maxHp) * 100))}%` }}
-            />
-          </div>
-        </div>
-      )}
 
       {/* Floating Combat Damage/Healing Numbers */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
