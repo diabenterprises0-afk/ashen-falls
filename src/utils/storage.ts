@@ -1,4 +1,4 @@
-import { GameSettings, JoystickConfig, GraphicSettings } from '../types/game';
+import { GameSettings, JoystickConfig, GraphicSettings, ModelCalibrationConfig } from '../types/game';
 
 export const DEFAULT_JOYSTICK_CONFIG: JoystickConfig = {
   deadzone: 0.12, // 12% deadzone prevents unintended micro-drift
@@ -12,6 +12,14 @@ export const DEFAULT_JOYSTICK_CONFIG: JoystickConfig = {
   leftHanded: false,
   cameraSensitivity: 1.1,
   cameraInvertY: false,
+};
+
+export const DEFAULT_MODEL_CALIBRATION: ModelCalibrationConfig = {
+  scaleMultiplier: 1.0,
+  yOffset: 0.0,
+  rotationOffsetY: 0,
+  castShadows: true,
+  useEmbeddedAnimations: true,
 };
 
 export const JOYSTICK_PRESETS: Record<string, { name: string; desc: string; config: Partial<JoystickConfig> }> = {
@@ -95,6 +103,7 @@ export function loadGameSettings(): GameSettings {
       return {
         joystick: { ...DEFAULT_JOYSTICK_CONFIG, ...(parsed.joystick || {}) },
         graphics: { ...DEFAULT_GRAPHICS, ...(parsed.graphics || {}) },
+        modelConfig: { ...DEFAULT_MODEL_CALIBRATION, ...(parsed.modelConfig || {}) },
         musicVolume: typeof parsed.musicVolume === 'number' ? parsed.musicVolume : 0.6,
         sfxVolume: typeof parsed.sfxVolume === 'number' ? parsed.sfxVolume : 0.8,
         hapticEnabled: typeof parsed.hapticEnabled === 'boolean' ? parsed.hapticEnabled : true,
@@ -106,6 +115,7 @@ export function loadGameSettings(): GameSettings {
   return {
     joystick: { ...DEFAULT_JOYSTICK_CONFIG },
     graphics: { ...DEFAULT_GRAPHICS },
+    modelConfig: { ...DEFAULT_MODEL_CALIBRATION },
     musicVolume: 0.6,
     sfxVolume: 0.8,
     hapticEnabled: true,

@@ -6,6 +6,7 @@ import { TouchCombatControls } from './components/TouchCombatControls';
 import { GameHUD } from './components/GameHUD';
 import { JoystickCalibrationModal } from './components/JoystickCalibrationModal';
 import { AndroidDeploymentModal } from './components/AndroidDeploymentModal';
+import { CharacterUploadModal } from './components/CharacterUploadModal';
 import { GameOverModal } from './components/GameOverModal';
 import { VictoryModal } from './components/VictoryModal';
 import {
@@ -15,6 +16,8 @@ import {
   FloatingText,
   JoystickConfig,
   GraphicSettings,
+  ModelCalibrationConfig,
+  CustomModelInfo,
 } from './types/game';
 import { loadGameSettings, saveGameSettings, triggerHaptic } from './utils/storage';
 import { soundManager } from './utils/audio';
@@ -62,9 +65,22 @@ export const App: React.FC = () => {
   const [fps, setFps] = useState(60);
   const [isLockedOn, setIsLockedOn] = useState(false);
 
+  // Custom Character Model Info
+  const [modelInfo, setModelInfo] = useState<CustomModelInfo>({
+    isLoaded: false,
+    name: 'Procedural Ashen Knight',
+    source: 'procedural_default',
+    hasAnimations: false,
+    animationNames: [],
+    meshCount: 14,
+    vertexCount: 960,
+    config: settings.modelConfig,
+  });
+
   // Modals
   const [showCalibrationModal, setShowCalibrationModal] = useState(false);
   const [showAndroidModal, setShowAndroidModal] = useState(false);
+  const [showCharacterModal, setShowCharacterModal] = useState(false);
   const [isGameOver, setIsGameOver] = useState(false);
   const [isVictory, setIsVictory] = useState(false);
 
@@ -87,9 +103,11 @@ export const App: React.FC = () => {
         onGameOver: () => setIsGameOver(true),
         onVictory: () => setIsVictory(true),
         onFpsUpdate: currentFps => setFps(currentFps),
+        onModelInfoUpdate: info => setModelInfo(info),
       },
       settings.joystick,
-      settings.graphics
+      settings.graphics,
+      settings.modelConfig
     );
 
     engineRef.current = engine;
@@ -117,6 +135,38 @@ export const App: React.FC = () => {
     saveGameSettings(newSettings);
     if (engineRef.current) {
       engineRef.current.graphicSettings = newGraphics;
+    }
+  };
+
+  const handleSaveModelCalibration = (newConfig: ModelCalibrationConfig) => {
+    const newSettings = { ...settings, modelConfig: newConfig };
+    setSettings(newSettings);
+    saveGameSettings(newSettings);
+    if (engineRef.current) {
+      engineRef.current.applyModelCalibration(newConfig);
+    }
+  };
+
+  const handleUploadCharacterFile = async (file: File): Promise<boolean> => {
+    if (!engineRef.current) return false;
+    try {
+      const buffer = await file.arrayBuffer();
+      const success = await engineRef.current.loadGLBFromArrayBuffer(buffer, file.name);
+      return success;
+    } catch (e) {
+      console.error('Failed to load uploaded character:', e);
+      return false;
+    }
+  };
+
+  const handleReloadFromFolder = async (): Promise<boolean> => {
+    if (!engineRef.current) return false;
+    return await engineRef.current.checkAndLoadDefaultGLB();
+  };
+
+  const handleResetCharacterToDefault = () => {
+    if (engineRef.current) {
+      engineRef.current.resetToDefaultKnight();
     }
   };
 
@@ -149,10 +199,20 @@ export const App: React.FC = () => {
       keysPressed[e.code] = true;
       if (!engineRef.current) return;
 
-      if (e.code === 'KeyJ' || e.code === 'Space') {
+      if (e.code === 'Space') {
+        engineRef.current.triggerJump();
+      } else if (e.code === 'KeyJ') {
         engineRef.current.triggerLightAttack();
+      } else if (e.code === 'KeyE') {
+        engineRef.current.triggerToggleSword();
+      } else if (e.code === 'KeyC') {
+        engineRef.current.toggleCrawl();
       } else if (e.code === 'KeyL') {
-        engineRef.current.triggerHeavyCleave();
+        if (engineRef.current.stats.isSwordEquipped) {
+          engineRef.current.triggerSwordDash();
+        } else {
+          engineRef.current.triggerHeavyCleave();
+        }
       } else if (e.code === 'KeyU') {
         engineRef.current.triggerRuneBurst();
       } else if (e.code === 'KeyK') {
@@ -208,12 +268,7 @@ export const App: React.FC = () => {
   const handleRespawn = () => {
     setIsGameOver(false);
     if (engineRef.current) {
-      engineRef.current.stats.hp = engineRef.current.stats.maxHp;
-      engineRef.current.stats.stamina = engineRef.current.stats.maxStamina;
-      engineRef.current.stats.potions = engineRef.current.stats.maxPotions;
-      engineRef.current.playerAction = 'IDLE';
-      engineRef.current.playerPosition.set(0, 0, 0);
-      engineRef.current.spawnChapterEnemies(engineRef.current.currentQuest.chapter);
+      engineRef.current.respawn();
     }
   };
 
@@ -221,9 +276,7 @@ export const App: React.FC = () => {
     setIsVictory(false);
     if (engineRef.current) {
       engineRef.current.stats.score = 0;
-      engineRef.current.stats.hp = engineRef.current.stats.maxHp;
-      engineRef.current.stats.potions = engineRef.current.stats.maxPotions;
-      engineRef.current.spawnChapterEnemies(1);
+      engineRef.current.respawn();
     }
   };
 
@@ -253,6 +306,7 @@ export const App: React.FC = () => {
         }}
         onOpenCalibration={() => setShowCalibrationModal(true)}
         onOpenAndroidModal={() => setShowAndroidModal(true)}
+        onOpenCharacterModal={() => setShowCharacterModal(true)}
       />
 
       {/* Interactive Calibrated Touch Joystick (Bottom Left Zone) */}
@@ -290,6 +344,9 @@ export const App: React.FC = () => {
             setIsLockedOn(!!engineRef.current?.targetLockEnemy);
           }}
           onQuickTurn={() => engineRef.current?.quickTurn180()}
+          onToggleSword={() => engineRef.current?.triggerToggleSword()}
+          onSwordDash={() => engineRef.current?.triggerSwordDash()}
+          onToggleCrawl={() => engineRef.current?.toggleCrawl()}
         />
       </div>
 
@@ -307,6 +364,17 @@ export const App: React.FC = () => {
           graphics={settings.graphics}
           onSaveGraphics={handleSaveGraphicsConfig}
           onClose={() => setShowAndroidModal(false)}
+        />
+      )}
+
+      {showCharacterModal && (
+        <CharacterUploadModal
+          modelInfo={modelInfo}
+          onUploadFile={handleUploadCharacterFile}
+          onReloadFromFolder={handleReloadFromFolder}
+          onSaveCalibration={handleSaveModelCalibration}
+          onResetToDefault={handleResetCharacterToDefault}
+          onClose={() => setShowCharacterModal(false)}
         />
       )}
 

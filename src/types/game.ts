@@ -1,18 +1,32 @@
 export type ActionState =
   | 'IDLE'
+  | 'WALK'
   | 'RUN'
   | 'SPRINT'
+  | 'JUMP'
+  | 'JUMP_START'
+  | 'JUMP_LAND'
+  | 'DOUBLE_JUMP'
+  | 'DODGE_ROLL'
+  | 'HIT_STOMACH'
   | 'ATTACK_1'
   | 'ATTACK_2'
   | 'ATTACK_3'
   | 'HEAVY_CLEAVE'
   | 'RUNE_BURST'
-  | 'DODGE_ROLL'
   | 'PARRY'
-  | 'JUMP'
   | 'HEAL'
   | 'HURT'
-  | 'DEAD';
+  | 'DEAD'
+  | 'PUNCH_JAB'
+  | 'PUNCH_CROSS'
+  | 'KICK'
+  | 'JUMP_SPIN_KICK'
+  | 'SWORD_ENTER'
+  | 'SWORD_ATTACK'
+  | 'SWORD_AERIAL'
+  | 'SWORD_DASH'
+  | 'CRAWL_BACKWARD';
 
 export type EnemyType = 'VOID_THRALL' | 'CORRUPTED_GUARD' | 'MALAKOR_BOSS';
 
@@ -54,6 +68,11 @@ export interface PlayerStats {
   isInvulnerable: boolean;
   isParrying: boolean;
   isSprinting: boolean;
+  isSwordEquipped?: boolean;
+  isCrawling?: boolean;
+  canDoubleJump?: boolean;
+  swordDashCooldown?: number;
+  dodgeCooldown?: number;
 }
 
 export interface EnemyEntity {
@@ -96,9 +115,29 @@ export interface ChapterQuest {
   bossAppeared: boolean;
 }
 
+export interface ModelCalibrationConfig {
+  scaleMultiplier: number; // 0.2x to 5.0x
+  yOffset: number; // -2.0 to 2.0
+  rotationOffsetY: number; // 0, 90, 180, 270 degrees
+  castShadows: boolean;
+  useEmbeddedAnimations: boolean;
+}
+
+export interface CustomModelInfo {
+  isLoaded: boolean;
+  name: string;
+  source: 'file' | 'static_url' | 'procedural_default';
+  hasAnimations: boolean;
+  animationNames: string[];
+  meshCount: number;
+  vertexCount: number;
+  config: ModelCalibrationConfig;
+}
+
 export interface GameSettings {
   joystick: JoystickConfig;
   graphics: GraphicSettings;
+  modelConfig: ModelCalibrationConfig;
   musicVolume: number;
   sfxVolume: number;
   hapticEnabled: boolean;

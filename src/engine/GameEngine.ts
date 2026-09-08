@@ -1,5 +1,16 @@
 import * as THREE from 'three';
-import { ActionState, EnemyEntity, FloatingText, JoystickConfig, GraphicSettings, PlayerStats, ChapterQuest } from '../types/game';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import {
+  ActionState,
+  EnemyEntity,
+  FloatingText,
+  JoystickConfig,
+  GraphicSettings,
+  PlayerStats,
+  ChapterQuest,
+  ModelCalibrationConfig,
+  CustomModelInfo,
+} from '../types/game';
 import { soundManager } from '../utils/audio';
 import { triggerHaptic } from '../utils/storage';
 
@@ -11,6 +22,7 @@ export interface GameEngineCallbacks {
   onGameOver: () => void;
   onVictory: () => void;
   onFpsUpdate: (fps: number) => void;
+  onModelInfoUpdate?: (info: CustomModelInfo) => void;
 }
 
 export class GameEngine {
@@ -40,6 +52,43 @@ export class GameEngine {
   public comboStep = 0;
   public comboWindowTimer = 0;
   public parryTimer = 0;
+
+  // Ash Animation & State Machine Properties
+  public isSwordEquipped = false;
+  public swordDrawnMesh: THREE.Object3D | null = null;
+  public swordSheathedMesh: THREE.Object3D | null = null;
+
+  public isDead = false;
+  public isDodging = false;
+  public dodgeTimer = 0;
+  public dodgeCooldownTimer = 0;
+
+  public isHitStunned = false;
+  public hitStunTimer = 0;
+
+  public isJumping = false;
+  public isDoubleJumping = false;
+  public doubleJumpAvailable = true;
+  public isLanding = false;
+  public landingTimer = 0;
+
+  public isAttacking = false;
+  public activeAttackClipName = '';
+  public attackAnimTime = 0;
+  public attackAnimDuration = 0;
+  public comboWindowStart = 0;
+  public comboWindowEnd = 0;
+  public inputBufferAttack = false;
+  public comboAdvanced = false;
+  public unarmedComboStep = 0;
+
+  public isDrawingSword = false;
+  public swordDashCooldownTimer = 0;
+  public isSwordDashing = false;
+
+  public isCrawlInputActive = false;
+  public currentAshClipName = '';
+  public primaryAnimState: string = 'IDLE';
 
   public stats: PlayerStats = {
     hp: 100,
@@ -76,6 +125,7 @@ export class GameEngine {
 
   // 3D Visual Objects
   private playerGroup!: THREE.Group;
+  private proceduralKnightGroup!: THREE.Group;
   private playerTorso!: THREE.Mesh;
   private playerHead!: THREE.Mesh;
   private playerVisorGlow!: THREE.Mesh;
@@ -88,6 +138,17 @@ export class GameEngine {
   private playerLeftLeg!: THREE.Group;
   private playerRightLeg!: THREE.Group;
   private slashTrailMesh!: THREE.Mesh;
+
+  // Custom GLB Model & Animations
+  public modelConfig: ModelCalibrationConfig;
+  public customModelInfo: CustomModelInfo;
+  private customModelGroup: THREE.Group | null = null;
+  private animationMixer: THREE.AnimationMixer | null = null;
+  private animationActions: Map<string, THREE.AnimationAction> = new Map();
+  private actionClipMap: Map<string, THREE.AnimationAction> = new Map();
+  private currentAnimationAction: THREE.AnimationAction | null = null;
+  private prevPlayerAction: ActionState = 'IDLE';
+  private gltfLoader = new GLTFLoader();
 
   // World objects
   private braziers: { light: THREE.PointLight; mesh: THREE.Group; x: number; z: number }[] = [];
@@ -114,12 +175,31 @@ export class GameEngine {
     container: HTMLElement,
     callbacks: GameEngineCallbacks,
     joystickConfig: JoystickConfig,
-    graphics: GraphicSettings
+    graphics: GraphicSettings,
+    modelConfig: ModelCalibrationConfig = {
+      scaleMultiplier: 1.0,
+      yOffset: 0.0,
+      rotationOffsetY: 0,
+      castShadows: true,
+      useEmbeddedAnimations: true,
+    }
   ) {
     this.container = container;
     this.callbacks = callbacks;
     this.joystickConfig = joystickConfig;
     this.graphicSettings = graphics;
+    this.modelConfig = modelConfig;
+
+    this.customModelInfo = {
+      isLoaded: false,
+      name: 'Procedural Ashen Knight',
+      source: 'procedural_default',
+      hasAnimations: false,
+      animationNames: [],
+      meshCount: 14,
+      vertexCount: 960,
+      config: { ...modelConfig },
+    };
 
     // 1. Scene Setup
     this.scene = new THREE.Scene();
@@ -158,7 +238,10 @@ export class GameEngine {
     // 5. Spawn Chapter 1 Enemies
     this.spawnChapterEnemies(1);
 
-    // 6. Handle Window Resizing
+    // 6. Automatically probe for /assets/characters/player.glb
+    this.checkAndLoadDefaultGLB();
+
+    // 7. Handle Window Resizing
     window.addEventListener('resize', this.onWindowResize);
 
     // Start ambient background music loop
@@ -313,6 +396,7 @@ export class GameEngine {
   // Procedural Articulated 3D Player Knight
   private buildPlayerModel(): THREE.Group {
     const group = new THREE.Group();
+    this.proceduralKnightGroup = new THREE.Group();
 
     // Dark steel & gold trimmed armor materials
     const armorMat = new THREE.MeshStandardMaterial({
@@ -335,7 +419,7 @@ export class GameEngine {
     this.playerTorso = new THREE.Mesh(torsoGeo, armorMat);
     this.playerTorso.position.y = 1.55;
     this.playerTorso.castShadow = true;
-    group.add(this.playerTorso);
+    this.proceduralKnightGroup.add(this.playerTorso);
 
     // Torso gold trim crest
     const crestGeo = new THREE.BoxGeometry(0.3, 0.5, 0.58);
@@ -465,7 +549,7 @@ export class GameEngine {
     legL.position.y = -0.42;
     legL.castShadow = true;
     this.playerLeftLeg.add(legL);
-    group.add(this.playerLeftLeg);
+    this.proceduralKnightGroup.add(this.playerLeftLeg);
 
     this.playerRightLeg = new THREE.Group();
     this.playerRightLeg.position.set(0.25, 0.95, 0);
@@ -473,8 +557,9 @@ export class GameEngine {
     legR.position.y = -0.42;
     legR.castShadow = true;
     this.playerRightLeg.add(legR);
-    group.add(this.playerRightLeg);
+    this.proceduralKnightGroup.add(this.playerRightLeg);
 
+    group.add(this.proceduralKnightGroup);
     return group;
   }
 
@@ -491,6 +576,289 @@ export class GameEngine {
     mesh.rotation.x = Math.PI / 2;
     mesh.position.y = 1.4;
     return mesh;
+  }
+
+  // Probe and load default /models/Ash.glb (or fallback character paths)
+  public async checkAndLoadDefaultGLB(): Promise<boolean> {
+    const candidatePaths = [
+      '/models/Ash.glb',
+      '/models/ash.glb',
+      '/public/models/Ash.glb',
+      '/assets/characters/Ash.glb',
+      '/assets/characters/player.glb',
+      '/assets/characters/Player.glb',
+      '/assets/characters/character.glb',
+      '/assets/characters/Character.glb',
+      '/assets/characters/hero.glb',
+      '/assets/characters/Hero.glb',
+      '/assets/characters/player.gltf',
+      '/assets/characters/character.gltf',
+      '/player.glb',
+      '/character.glb',
+    ];
+
+    for (const path of candidatePaths) {
+      try {
+        let res = await fetch(path, { method: 'HEAD' });
+        if (!res.ok && res.status !== 404) {
+          // If server rejects HEAD, retry with GET
+          res = await fetch(path, { method: 'GET', headers: { Range: 'bytes=0-32' } });
+        }
+        if (res.ok) {
+          const loaded = await this.loadGLBFromURL(path, path.split('/').pop() || 'Ash.glb');
+          if (loaded) return true;
+        }
+      } catch (e) {
+        // file not yet placed, fallback smoothly
+      }
+    }
+    return false;
+  }
+
+  // Load GLB from URL (e.g. static assets)
+  public async loadGLBFromURL(url: string, fileName = 'player.glb'): Promise<boolean> {
+    return new Promise(resolve => {
+      this.gltfLoader.load(
+        url,
+        gltf => {
+          this.setupGLTFModel(gltf, fileName, 'static_url');
+          resolve(true);
+        },
+        undefined,
+        error => {
+          console.warn('Failed to load GLB from url:', url, error);
+          resolve(false);
+        }
+      );
+    });
+  }
+
+  // Load GLB from raw ArrayBuffer (from drag-and-drop or file upload)
+  public async loadGLBFromArrayBuffer(buffer: ArrayBuffer, fileName = 'custom_character.glb'): Promise<boolean> {
+    return new Promise((resolve, reject) => {
+      this.gltfLoader.parse(
+        buffer,
+        '',
+        gltf => {
+          this.setupGLTFModel(gltf, fileName, 'file');
+          resolve(true);
+        },
+        error => {
+          console.error('Failed to parse uploaded GLB array buffer:', error);
+          reject(error);
+        }
+      );
+    });
+  }
+
+  // Parse and mount GLTF character into the player hierarchy
+  private setupGLTFModel(gltf: any, name: string, source: 'file' | 'static_url') {
+    // 1. Remove old custom model if present
+    if (this.customModelGroup) {
+      this.playerGroup.remove(this.customModelGroup);
+      this.customModelGroup = null;
+    }
+
+    // 2. Hide procedural knight
+    this.proceduralKnightGroup.visible = false;
+
+    // 3. Create fresh wrapper group
+    this.customModelGroup = new THREE.Group();
+    const model = gltf.scene;
+
+    // Compute bounding box for auto-scaling and auto-grounding
+    const bbox = new THREE.Box3().setFromObject(model);
+    const size = bbox.getSize(new THREE.Vector3());
+    const center = bbox.getCenter(new THREE.Vector3());
+
+    // Standard target character height is 1.95 units
+    const targetHeight = 1.95;
+    const baseScale = size.y > 0.001 ? targetHeight / size.y : 1.0;
+
+    // Center and ground the model so feet are at y = 0
+    model.position.set(-center.x * baseScale, -bbox.min.y * baseScale, -center.z * baseScale);
+    model.scale.set(baseScale, baseScale, baseScale);
+
+    let meshCount = 0;
+    let vertexCount = 0;
+
+    // Detect bone sockets for models with weapon systems (like Ash.glb)
+    let rightHandBone: THREE.Object3D | null = null;
+    let hipsBone: THREE.Object3D | null = null;
+    let swordHandSocket: THREE.Object3D | null = null;
+    let swordSheathSocket: THREE.Object3D | null = null;
+    let swordDrawn: THREE.Object3D | null = null;
+    let swordSheathed: THREE.Object3D | null = null;
+
+    model.traverse((child: any) => {
+      if (child.name === 'RightHand') rightHandBone = child;
+      if (child.name === 'Hips') hipsBone = child;
+      if (child.name === 'SwordHandSocket') swordHandSocket = child;
+      if (child.name === 'SwordSheathSocket') swordSheathSocket = child;
+      if (child.name === 'Sword_Drawn') swordDrawn = child;
+      if (child.name === 'Sword_Sheathed') swordSheathed = child;
+
+      if (child.isMesh) {
+        meshCount++;
+        if (child.geometry && child.geometry.attributes && child.geometry.attributes.position) {
+          vertexCount += child.geometry.attributes.position.count;
+        }
+        child.castShadow = this.modelConfig.castShadows;
+        child.receiveShadow = true;
+        if (child.material) {
+          child.material.side = THREE.DoubleSide;
+        }
+      }
+    });
+
+    // Parent sword to RightHand bone and sheath to Hips bone if specified in model
+    if (rightHandBone && swordHandSocket) {
+      (rightHandBone as THREE.Object3D).add(swordHandSocket);
+    }
+    if (hipsBone && swordSheathSocket) {
+      (hipsBone as THREE.Object3D).add(swordSheathSocket);
+    }
+    this.swordDrawnMesh = swordDrawn;
+    this.swordSheathedMesh = swordSheathed;
+
+    // Initially unarmed as required: sword in sheath on hips, hands free for punches
+    const drawn = this.swordDrawnMesh as any;
+    const sheathed = this.swordSheathedMesh as any;
+    if (drawn) drawn.visible = this.isSwordEquipped;
+    if (sheathed) sheathed.visible = !this.isSwordEquipped;
+
+    // 4. Setup Skeletal Animation Mixer if animations exist
+    const animNames: string[] = [];
+    this.animationActions.clear();
+    this.actionClipMap.clear();
+
+    if (gltf.animations && gltf.animations.length > 0) {
+      this.animationMixer = new THREE.AnimationMixer(model);
+
+      gltf.animations.forEach((clip: THREE.AnimationClip) => {
+        animNames.push(clip.name);
+        const action = this.animationMixer!.clipAction(clip);
+        this.animationActions.set(clip.name, action);
+
+        // Loop and Clamping rules
+        if (
+          clip.name === 'Idle' ||
+          clip.name === 'Walk (mocap)' ||
+          clip.name === 'Sprint' ||
+          clip.name === 'Crawl Backward'
+        ) {
+          action.loop = THREE.LoopRepeat;
+          action.clampWhenFinished = false;
+        } else {
+          action.loop = THREE.LoopOnce;
+          action.clampWhenFinished = true;
+        }
+
+        // Action-specific playback speeds for responsiveness
+        if (clip.name === 'Idle') action.timeScale = 1.0;
+        else if (clip.name === 'Walk (mocap)') action.timeScale = 1.1;
+        else if (clip.name === 'Sprint') action.timeScale = 1.15;
+        else if (clip.name === 'Jump Start') action.timeScale = 1.8;
+        else if (clip.name === 'Jump Land') action.timeScale = 2.2;
+        else if (clip.name === 'Ninja Jump Double') action.timeScale = 1.8;
+        else if (clip.name === 'Punch (jab)') action.timeScale = 1.8;
+        else if (clip.name === 'Punch (cross)') action.timeScale = 1.8;
+        else if (clip.name === 'Kick') action.timeScale = 1.8;
+        else if (clip.name.startsWith('Jumping spinning kick')) action.timeScale = 2.4;
+        else if (clip.name === 'Sword Enter') action.timeScale = 1.6;
+        else if (clip.name === 'Sword Attack') action.timeScale = 2.2;
+        else if (clip.name === 'Sword Aerial Combo') action.timeScale = 1.7;
+        else if (clip.name === 'Sword Dash Root Motion') action.timeScale = 2.0;
+        else if (clip.name === 'Hit Stomach') action.timeScale = 1.8;
+        else if (clip.name === 'Death') action.timeScale = 1.0;
+        else if (clip.name === 'Crawl Backward') action.timeScale = 1.3;
+      });
+
+      // Register friendly aliases for spinning kick
+      const spinKick = this.animationActions.get('Jumping spinning kick (c0a12a) (in place)');
+      if (spinKick) {
+        this.animationActions.set('Jumping spinning kick (in place)', spinKick);
+        this.animationActions.set('Jumping spinning kick', spinKick);
+      }
+
+      // Hook animation mixer completion listener
+      this.animationMixer.addEventListener('finished', (e: any) => {
+        const finishedClipName = e.action?.getClip()?.name || '';
+        this.handleAnimationFinished(finishedClipName);
+      });
+
+      const initialAction = this.animationActions.get('Idle') || this.animationActions.values().next().value;
+      if (initialAction) {
+        initialAction.play();
+        this.currentAnimationAction = initialAction;
+        this.currentAshClipName = 'Idle';
+      }
+    } else {
+      this.animationMixer = null;
+    }
+
+    this.customModelGroup.add(model);
+    this.playerGroup.add(this.customModelGroup);
+    this.applyModelCalibration(this.modelConfig);
+
+    this.customModelInfo = {
+      isLoaded: true,
+      name,
+      source,
+      hasAnimations: animNames.length > 0,
+      animationNames: animNames,
+      meshCount,
+      vertexCount,
+      config: { ...this.modelConfig },
+    };
+
+    this.callbacks.onModelInfoUpdate?.(this.customModelInfo);
+    this.callbacks.onFloatingText({
+      id: `model_${Date.now()}`,
+      text: `3D HERO LOADED: ${name}`,
+      x: this.playerPosition.x,
+      y: this.playerPosition.y + 2.2,
+      z: this.playerPosition.z,
+      color: '#22d3ee',
+      createdAt: Date.now(),
+      duration: 1800,
+      scale: 1.25,
+    });
+  }
+
+  // Update Model Scale, Ground Y-Offset, and Facing Angle
+  public applyModelCalibration(config: ModelCalibrationConfig) {
+    this.modelConfig = { ...config };
+    this.customModelInfo.config = { ...config };
+
+    if (this.customModelGroup) {
+      this.customModelGroup.scale.set(config.scaleMultiplier, config.scaleMultiplier, config.scaleMultiplier);
+      this.customModelGroup.position.y = config.yOffset;
+      this.customModelGroup.rotation.y = (config.rotationOffsetY * Math.PI) / 180;
+    }
+  }
+
+  // Reset to default procedural knight
+  public resetToDefaultKnight() {
+    if (this.customModelGroup) {
+      this.playerGroup.remove(this.customModelGroup);
+      this.customModelGroup = null;
+    }
+    this.animationMixer = null;
+    this.proceduralKnightGroup.visible = true;
+
+    this.customModelInfo = {
+      isLoaded: false,
+      name: 'Procedural Ashen Knight',
+      source: 'procedural_default',
+      hasAnimations: false,
+      animationNames: [],
+      meshCount: 14,
+      vertexCount: 960,
+      config: { ...this.modelConfig },
+    };
+
+    this.callbacks.onModelInfoUpdate?.(this.customModelInfo);
   }
 
   // Spawns enemies according to chapter progression
@@ -739,67 +1107,355 @@ export class GameEngine {
     this.enemyMeshes.set(enemy.id, group);
   }
 
-  // Combat Input Actions
-  public triggerLightAttack() {
-    if (this.playerAction !== 'IDLE' && this.playerAction !== 'RUN' && this.playerAction !== 'SPRINT') {
-      if (this.comboWindowTimer <= 0) return;
-    }
-    if (this.stats.stamina < 12) return;
+  // -------------------------------------------------------------
+  // ASH ANIMATION & COMBAT ENGINE
+  // -------------------------------------------------------------
 
-    this.stats.stamina = Math.max(0, this.stats.stamina - 12);
-    triggerHaptic(25);
+  public playAshAnimation(clipName: string, blendDuration = 0.12, restartIfSame = false) {
+    if (!this.animationMixer) return;
+    const action = this.animationActions.get(clipName);
+    if (!action) return;
 
-    // Combo Progression (1 -> 2 -> 3 -> 1)
-    if (this.comboStep === 0 || this.comboWindowTimer <= 0) {
-      this.comboStep = 1;
-      this.playerAction = 'ATTACK_1';
-      this.actionTimer = 0.32;
-      soundManager.playSwing(1.0);
-    } else if (this.comboStep === 1) {
-      this.comboStep = 2;
-      this.playerAction = 'ATTACK_2';
-      this.actionTimer = 0.32;
-      soundManager.playSwing(1.2);
-    } else {
-      this.comboStep = 3;
-      this.playerAction = 'ATTACK_3';
-      this.actionTimer = 0.42;
-      soundManager.playSwing(0.85);
+    if (this.currentAshClipName === clipName && !restartIfSame) {
+      if (!action.isRunning()) {
+        action.play();
+      }
+      return;
     }
 
-    this.comboWindowTimer = 0.65;
-    this.performAttackHitCheck(this.comboStep);
+    if (this.currentAnimationAction && this.currentAnimationAction !== action) {
+      this.currentAnimationAction.fadeOut(blendDuration);
+    }
+
+    action.reset().fadeIn(blendDuration).play();
+    this.currentAnimationAction = action;
+    this.currentAshClipName = clipName;
   }
 
-  public triggerHeavyCleave() {
-    if (this.playerAction !== 'IDLE' && this.playerAction !== 'RUN' && this.playerAction !== 'SPRINT') return;
-    if (this.stats.stamina < 28) return;
+  public handleAnimationFinished(clipName: string) {
+    if (clipName === 'Sword Enter') {
+      this.isSwordEquipped = true;
+      this.stats.isSwordEquipped = true;
+      if (this.swordDrawnMesh) this.swordDrawnMesh.visible = true;
+      if (this.swordSheathedMesh) this.swordSheathedMesh.visible = false;
+      this.isDrawingSword = false;
+      this.isAttacking = false;
+      this.activeAttackClipName = '';
+    } else if (clipName === 'Jump Land') {
+      this.isLanding = false;
+    } else if (clipName === 'Ninja Jump Double') {
+      if (this.isDodging) {
+        this.isDodging = false;
+        this.stats.isInvulnerable = false;
+        this.dodgeCooldownTimer = 0.25;
+        this.stats.dodgeCooldown = 0.25;
+      }
+      if (this.isDoubleJumping) {
+        this.isDoubleJumping = false;
+      }
+    } else if (clipName === 'Hit Stomach') {
+      this.isHitStunned = false;
+    } else if (clipName === 'Sword Dash Root Motion') {
+      this.isSwordDashing = false;
+      this.isAttacking = false;
+      this.activeAttackClipName = '';
+    }
+  }
 
-    this.stats.stamina = Math.max(0, this.stats.stamina - 28);
-    this.playerAction = 'HEAVY_CLEAVE';
-    this.actionTimer = 0.65;
-    triggerHaptic(50);
+  // 6. IDLE/WALK/SPRINT -> ATTACK (Unarmed combo sequence & Sword attack)
+  public triggerLightAttack() {
+    if (this.isDead || this.isDodging || this.isHitStunned || this.isDrawingSword || this.isSwordDashing) return;
+
+    // 8. Air attacks
+    if (!this.isGrounded) {
+      this.triggerAirAttack();
+      return;
+    }
+
+    // 10. Sword Attack
+    if (this.isSwordEquipped) {
+      this.triggerSwordAttack();
+      return;
+    }
+
+    // Unarmed ground combo
+    if (this.stats.stamina < 8) return;
+
+    if (!this.isAttacking) {
+      this.stats.stamina = Math.max(0, this.stats.stamina - 8);
+      this.startUnarmedAttack(1);
+    } else {
+      // In active attack: check combo window and input buffer
+      if (this.attackAnimTime < this.comboWindowStart) {
+        // Slightly before combo window: remember via input buffer
+        this.inputBufferAttack = true;
+      } else if (this.attackAnimTime >= this.comboWindowStart && this.attackAnimTime <= this.comboWindowEnd) {
+        // Within combo window: advance immediately
+        this.stats.stamina = Math.max(0, this.stats.stamina - 8);
+        this.advanceUnarmedCombo();
+      }
+      // If outside combo window: do not restart current attack
+    }
+  }
+
+  private startUnarmedAttack(step: number) {
+    this.isAttacking = true;
+    this.unarmedComboStep = step;
+    this.attackAnimTime = 0;
+    this.inputBufferAttack = false;
+    this.comboAdvanced = false;
+
+    if (step === 1) {
+      this.activeAttackClipName = 'Punch (jab)';
+      this.attackAnimDuration = 0.833 / 1.8; // ~0.46s
+      this.comboWindowStart = 0.18;
+      this.comboWindowEnd = 0.42;
+      this.stats.comboCount = 1;
+      this.stats.comboMultiplier = 1.0;
+      soundManager.playSwing(1.1);
+      triggerHaptic(20);
+      setTimeout(() => this.performAttackHitCheck(1, false), 180);
+    } else if (step === 2) {
+      this.activeAttackClipName = 'Punch (cross)';
+      this.attackAnimDuration = 0.967 / 1.8; // ~0.54s
+      this.comboWindowStart = 0.20;
+      this.comboWindowEnd = 0.48;
+      this.stats.comboCount = 2;
+      this.stats.comboMultiplier = 1.25;
+      soundManager.playSwing(1.2);
+      triggerHaptic(25);
+      setTimeout(() => this.performAttackHitCheck(2, false), 200);
+    } else if (step === 3) {
+      this.activeAttackClipName = 'Kick';
+      this.attackAnimDuration = 1.100 / 1.8; // ~0.61s
+      this.comboWindowStart = 0.24;
+      this.comboWindowEnd = 0.55;
+      this.stats.comboCount = 3;
+      this.stats.comboMultiplier = 1.5;
+      soundManager.playSwing(1.3);
+      triggerHaptic(30);
+      setTimeout(() => this.performAttackHitCheck(3, false), 240);
+    } else if (step === 4) {
+      this.activeAttackClipName = 'Jumping spinning kick (c0a12a) (in place)';
+      this.attackAnimDuration = 3.967 / 2.4; // ~1.65s
+      this.comboWindowStart = 999; // final finisher
+      this.comboWindowEnd = 999;
+      this.stats.comboCount = 4;
+      this.stats.comboMultiplier = 2.0;
+      soundManager.playSwing(0.9);
+      triggerHaptic(45);
+      setTimeout(() => this.performAttackHitCheck(4, true), 350);
+      setTimeout(() => this.performAttackHitCheck(4, true), 700);
+    }
+
+    this.playAshAnimation(this.activeAttackClipName, 0.06, true);
+  }
+
+  public advanceUnarmedCombo() {
+    if (this.comboAdvanced) return;
+    if (this.unarmedComboStep === 1) {
+      this.comboAdvanced = true;
+      this.startUnarmedAttack(2);
+    } else if (this.unarmedComboStep === 2) {
+      this.comboAdvanced = true;
+      this.startUnarmedAttack(3);
+    } else if (this.unarmedComboStep === 3) {
+      this.comboAdvanced = true;
+      this.startUnarmedAttack(4);
+    }
+  }
+
+  // 10. SWORD ATTACK
+  public triggerSwordAttack() {
+    if (!this.isSwordEquipped || this.isDead || this.isDodging || this.isHitStunned || this.isDrawingSword || this.isSwordDashing) return;
+    if (this.stats.stamina < 12) return;
+
+    if (!this.isAttacking) {
+      this.stats.stamina = Math.max(0, this.stats.stamina - 12);
+      this.isAttacking = true;
+      this.activeAttackClipName = 'Sword Attack';
+      this.attackAnimTime = 0;
+      this.attackAnimDuration = 1.533 / 2.2; // ~0.70s
+      this.comboWindowStart = 0.28;
+      this.comboWindowEnd = 0.58;
+      this.inputBufferAttack = false;
+      this.comboAdvanced = false;
+      this.stats.comboCount = (this.stats.comboCount % 3) + 1;
+      this.stats.comboMultiplier = 1.0 + this.stats.comboCount * 0.2;
+
+      this.playAshAnimation('Sword Attack', 0.06, true);
+      soundManager.playSwing(1.0);
+      triggerHaptic(30);
+      setTimeout(() => this.performAttackHitCheck(2, false), 220);
+    } else if (this.activeAttackClipName === 'Sword Attack') {
+      if (this.attackAnimTime < this.comboWindowStart) {
+        this.inputBufferAttack = true;
+      } else if (this.attackAnimTime >= this.comboWindowStart && this.attackAnimTime <= this.comboWindowEnd && !this.comboAdvanced) {
+        this.comboAdvanced = true;
+        this.stats.stamina = Math.max(0, this.stats.stamina - 12);
+        this.attackAnimTime = 0;
+        this.inputBufferAttack = false;
+        this.stats.comboCount = (this.stats.comboCount % 3) + 1;
+        this.stats.comboMultiplier = 1.0 + this.stats.comboCount * 0.3;
+        this.playAshAnimation('Sword Attack', 0.06, true);
+        soundManager.playSwing(1.2);
+        triggerHaptic(35);
+        setTimeout(() => this.performAttackHitCheck(3, true), 220);
+      }
+    }
+  }
+
+  // 8. AIR ATTACKS
+  public triggerAirAttack() {
+    if (this.isGrounded || this.isDead || this.isDodging || this.isHitStunned) return;
+    if (this.stats.stamina < 15) return;
+    this.stats.stamina = Math.max(0, this.stats.stamina - 15);
+
+    this.isAttacking = true;
+    this.attackAnimTime = 0;
+    this.inputBufferAttack = false;
+
+    if (this.isSwordEquipped) {
+      // 11. SWORD AERIAL COMBO
+      this.activeAttackClipName = 'Sword Aerial Combo';
+      this.attackAnimDuration = 1.000 / 1.7; // ~0.59s
+      this.comboWindowStart = 999;
+      this.comboWindowEnd = 999;
+      soundManager.playSwing(1.2);
+      triggerHaptic(30);
+      setTimeout(() => this.performAttackHitCheck(3, false), 200);
+    } else {
+      // Unarmed aerial kick
+      this.activeAttackClipName = 'Jumping spinning kick (c0a12a) (in place)';
+      this.attackAnimDuration = 3.967 / 2.4;
+      this.comboWindowStart = 999;
+      this.comboWindowEnd = 999;
+      soundManager.playSwing(1.0);
+      triggerHaptic(35);
+      setTimeout(() => this.performAttackHitCheck(3, true), 300);
+    }
+
+    this.playAshAnimation(this.activeAttackClipName, 0.06, true);
+  }
+
+  // 9. SWORD ENTER & SHEATHE
+  public triggerToggleSword() {
+    if (this.isDead || this.isDodging || this.isHitStunned || this.isDrawingSword || this.isSwordDashing) return;
+
+    if (!this.isSwordEquipped) {
+      // Draw sword with "Sword Enter"
+      this.isAttacking = true;
+      this.isDrawingSword = true;
+      this.activeAttackClipName = 'Sword Enter';
+      this.attackAnimTime = 0;
+      this.attackAnimDuration = 1.300 / 1.6; // ~0.81s
+      this.comboWindowStart = 999;
+      this.comboWindowEnd = 999;
+
+      this.playAshAnimation('Sword Enter', 0.06, true);
+      soundManager.playSwing(0.8);
+      triggerHaptic(30);
+
+      // Equip sword to hand when hand grasps hilt in animation (~0.5s)
+      setTimeout(() => {
+        if (this.isDead) return;
+        this.isSwordEquipped = true;
+        this.stats.isSwordEquipped = true;
+        if (this.swordDrawnMesh) this.swordDrawnMesh.visible = true;
+        if (this.swordSheathedMesh) this.swordSheathedMesh.visible = false;
+        soundManager.playSwing(1.3);
+      }, 500);
+
+      this.callbacks.onFloatingText({
+        id: Math.random().toString(),
+        text: 'SWORD DRAWN',
+        x: this.playerPosition.x,
+        y: this.playerPosition.y + 2.2,
+        z: this.playerPosition.z,
+        color: '#22d3ee',
+        createdAt: Date.now(),
+        duration: 1000,
+        scale: 1.2,
+      });
+    } else {
+      // Sheathe sword
+      if (this.isAttacking) return;
+      this.isSwordEquipped = false;
+      this.stats.isSwordEquipped = false;
+      if (this.swordDrawnMesh) this.swordDrawnMesh.visible = false;
+      if (this.swordSheathedMesh) this.swordSheathedMesh.visible = true;
+      triggerHaptic(20);
+
+      this.callbacks.onFloatingText({
+        id: Math.random().toString(),
+        text: 'SWORD SHEATHED',
+        x: this.playerPosition.x,
+        y: this.playerPosition.y + 2.2,
+        z: this.playerPosition.z,
+        color: '#94a3b8',
+        createdAt: Date.now(),
+        duration: 1000,
+        scale: 1.1,
+      });
+    }
+  }
+
+  // 12. SWORD DASH
+  public triggerSwordDash() {
+    if (!this.isSwordEquipped || this.isDead || this.isDodging || this.isHitStunned || this.swordDashCooldownTimer > 0) return;
+    if (this.stats.stamina < 20) return;
+
+    this.stats.stamina = Math.max(0, this.stats.stamina - 20);
+    this.isAttacking = true;
+    this.isSwordDashing = true;
+    this.swordDashCooldownTimer = 1.2;
+    this.stats.swordDashCooldown = 1.2;
+    this.activeAttackClipName = 'Sword Dash Root Motion';
+    this.attackAnimTime = 0;
+    this.attackAnimDuration = 1.567 / 2.0; // ~0.78s
+    this.comboWindowStart = 999;
+    this.comboWindowEnd = 999;
+
+    this.playAshAnimation('Sword Dash Root Motion', 0.06, true);
     soundManager.playHeavyCleave();
+    triggerHaptic(40);
+
+    const dashAngle = this.inputVector.magnitude > 0.1
+      ? Math.atan2(this.inputVector.x, this.inputVector.y) + this.cameraYaw
+      : this.playerRotationY;
+    this.playerRotationY = dashAngle;
+    this.playerVelocity.set(
+      Math.sin(dashAngle) * 14.0,
+      0,
+      Math.cos(dashAngle) * 14.0
+    );
 
     setTimeout(() => {
       this.performAttackHitCheck(4, true);
-    }, 220);
+    }, 250);
+  }
+
+  // Heavy Cleave fallback
+  public triggerHeavyCleave() {
+    if (this.isSwordEquipped) {
+      this.triggerSwordDash();
+    } else {
+      if (this.stats.stamina < 25) return;
+      this.stats.stamina = Math.max(0, this.stats.stamina - 25);
+      this.startUnarmedAttack(4);
+    }
   }
 
   public triggerRuneBurst() {
     if (this.stats.runes < 30) return;
-    if (this.playerAction === 'RUNE_BURST' || this.playerAction === 'DEAD') return;
+    if (this.isDead || this.playerAction === 'DEAD') return;
 
     this.stats.runes -= 30;
-    this.playerAction = 'RUNE_BURST';
-    this.actionTimer = 0.55;
     triggerHaptic(60);
     soundManager.playRuneBurst();
 
-    // Spawn 3D Radiant Shockwave
     this.spawnRuneBurstParticles(this.playerPosition);
 
-    // Hit all enemies in 6.5 radius
     this.enemies.forEach(enemy => {
       if (enemy.state === 'DEAD') return;
       const dist = this.playerPosition.distanceTo(new THREE.Vector3(enemy.x, enemy.y, enemy.z));
@@ -809,55 +1465,99 @@ export class GameEngine {
     });
   }
 
+  // 5. ANY NORMAL STATE -> DODGE
   public triggerDodgeRoll() {
-    if (this.stats.stamina < 20) return;
-    if (this.playerAction === 'DODGE_ROLL' || this.playerAction === 'DEAD') return;
+    if (this.isDead || this.isDodging || this.dodgeCooldownTimer > 0) return;
+    if (this.stats.stamina < 18) return;
 
-    this.stats.stamina = Math.max(0, this.stats.stamina - 20);
-    this.playerAction = 'DODGE_ROLL';
-    this.actionTimer = 0.42;
+    this.stats.stamina = Math.max(0, this.stats.stamina - 18);
+    // Cancel normal movement and attacks
+    this.isAttacking = false;
+    this.unarmedComboStep = 0;
+    this.activeAttackClipName = '';
+    this.isDrawingSword = false;
+    this.isSwordDashing = false;
+
+    this.isDodging = true;
+    this.dodgeTimer = 0.45;
     this.stats.isInvulnerable = true;
     triggerHaptic(20);
     soundManager.playDodge();
 
-    // Roll impulse vector
     let moveAngle = this.playerRotationY;
     if (this.inputVector.magnitude > 0.1) {
       moveAngle = Math.atan2(this.inputVector.x, this.inputVector.y) + this.cameraYaw;
+      this.playerRotationY = moveAngle;
     }
     this.playerVelocity.set(
-      Math.sin(moveAngle) * 9.5,
+      Math.sin(moveAngle) * 11.0,
       0,
-      Math.cos(moveAngle) * 9.5
+      Math.cos(moveAngle) * 11.0
     );
+
+    this.playAshAnimation('Ninja Jump Double', 0.05, true);
   }
 
   public triggerParry() {
-    if (this.stats.stamina < 15) return;
-    if (this.playerAction === 'PARRY' || this.playerAction === 'DEAD') return;
+    if (this.stats.stamina < 15 || this.isDead || this.isDodging) return;
 
     this.stats.stamina = Math.max(0, this.stats.stamina - 15);
-    this.playerAction = 'PARRY';
-    this.actionTimer = 0.45;
-    this.parryTimer = 0.35; // active parry frame window
+    this.parryTimer = 0.35;
     this.stats.isParrying = true;
     triggerHaptic(30);
   }
 
+  // 3. IDLE/WALK/SPRINT -> JUMP & 4. AIRBORNE -> DOUBLE JUMP
   public triggerJump() {
-    if (!this.isGrounded || this.playerAction === 'DEAD') return;
-    this.playerVy = 7.5;
+    if (this.isDead || this.isDodging || this.isHitStunned) return;
+
+    if (!this.isGrounded) {
+      // Airborne: trigger double jump if available
+      if (this.doubleJumpAvailable && !this.isDoubleJumping) {
+        this.triggerDoubleJump();
+      }
+      return;
+    }
+
+    if (this.isAttacking) return; // Jump does not interrupt attack (Rule 7)
+
+    // Ground jump: Jump Start
     this.isGrounded = false;
+    this.isJumping = true;
+    this.isDoubleJumping = false;
+    this.doubleJumpAvailable = true;
+    this.isLanding = false;
+    this.playerVy = 8.0;
+    this.playAshAnimation('Jump Start', 0.06, true);
+    soundManager.playSwing(1.3);
     triggerHaptic(15);
   }
 
+  public triggerDoubleJump() {
+    if (this.isGrounded || !this.doubleJumpAvailable || this.isDoubleJumping || this.isDead) return;
+    this.isDoubleJumping = true;
+    this.doubleJumpAvailable = false;
+    this.playerVy = 6.8;
+    this.playAshAnimation('Ninja Jump Double', 0.06, true);
+    soundManager.playSwing(1.6);
+    triggerHaptic(30);
+  }
+
+  // 15. CRAWL BACKWARD
+  public setCrawlActive(active: boolean) {
+    this.isCrawlInputActive = active;
+    this.stats.isCrawling = active;
+  }
+
+  public toggleCrawl() {
+    this.setCrawlActive(!this.isCrawlInputActive);
+  }
+
   public triggerHealPotion() {
-    if (this.stats.potions <= 0 || this.stats.hp >= this.stats.maxHp || this.playerAction === 'DEAD') return;
+    if (this.stats.potions <= 0 || this.stats.hp >= this.stats.maxHp || this.isDead) return;
 
     this.stats.potions -= 1;
     this.stats.hp = Math.min(this.stats.maxHp, this.stats.hp + this.stats.potionHealAmount);
-    this.playerAction = 'HEAL';
-    this.actionTimer = 0.5;
     triggerHaptic(40);
     soundManager.playPotion();
 
@@ -1018,7 +1718,7 @@ export class GameEngine {
 
   // Damage player from enemy attacks
   private damagePlayer(damage: number, attackerName: string) {
-    if (this.stats.isInvulnerable || this.stats.hp <= 0) return;
+    if (this.isDead || this.stats.isInvulnerable || this.stats.hp <= 0) return;
 
     // Check Parry Stance
     if (this.stats.isParrying && this.parryTimer > 0) {
@@ -1042,8 +1742,6 @@ export class GameEngine {
     this.stats.hp = Math.max(0, this.stats.hp - damage);
     soundManager.playHurt();
     triggerHaptic(45);
-    this.playerAction = 'HURT';
-    this.actionTimer = 0.25;
 
     this.callbacks.onFloatingText({
       id: Math.random().toString(),
@@ -1058,9 +1756,76 @@ export class GameEngine {
     });
 
     if (this.stats.hp <= 0) {
+      // 14. DEATH STATE - Highest priority, cannot be interrupted
+      this.isDead = true;
+      this.stats.hp = 0;
       this.playerAction = 'DEAD';
+      this.primaryAnimState = 'DEATH';
+
+      // Clear all active states and velocity
+      this.isAttacking = false;
+      this.isDodging = false;
+      this.isHitStunned = false;
+      this.isDrawingSword = false;
+      this.isSwordDashing = false;
+      this.isJumping = false;
+      this.isDoubleJumping = false;
+      this.playerVelocity.set(0, 0, 0);
+      this.playerVy = 0;
+
+      this.playAshAnimation('Death', 0.05, true);
       this.callbacks.onGameOver();
+    } else {
+      // 13. HIT STOMACH (DAMAGE REACTION)
+      // Prevent multiple Hit Stomach animations from stacking simultaneously
+      if (!this.isHitStunned && this.hitStunTimer <= 0) {
+        this.isHitStunned = true;
+        this.hitStunTimer = 0.35;
+        this.playerAction = 'HIT_STOMACH';
+        this.primaryAnimState = 'HIT_STOMACH';
+
+        // Damage reaction interrupts attacks and normal movement
+        this.isAttacking = false;
+        this.unarmedComboStep = 0;
+        this.activeAttackClipName = '';
+        this.isDrawingSword = false;
+        this.isSwordDashing = false;
+
+        this.playAshAnimation('Hit Stomach', 0.05, true);
+      }
     }
+  }
+
+  // Respawn player
+  public respawn() {
+    this.isDead = false;
+    this.stats.hp = this.stats.maxHp;
+    this.stats.stamina = this.stats.maxStamina;
+    this.stats.potions = this.stats.maxPotions;
+    this.stats.isInvulnerable = false;
+    this.stats.isParrying = false;
+    this.stats.isSprinting = false;
+
+    this.playerAction = 'IDLE';
+    this.primaryAnimState = 'IDLE';
+    this.isAttacking = false;
+    this.isDodging = false;
+    this.isHitStunned = false;
+    this.isDrawingSword = false;
+    this.isSwordDashing = false;
+    this.isJumping = false;
+    this.isDoubleJumping = false;
+    this.isLanding = false;
+    this.unarmedComboStep = 0;
+    this.activeAttackClipName = '';
+
+    this.playerPosition.set(0, 0, 0);
+    this.playerVelocity.set(0, 0, 0);
+    this.playerVy = 0;
+    this.isGrounded = true;
+
+    this.playAshAnimation('Idle', 0.15, true);
+    this.spawnChapterEnemies(this.currentQuest.chapter);
   }
 
   // Particle Emitters
@@ -1132,6 +1897,7 @@ export class GameEngine {
   // Main Loop Update
   public update(delta: number) {
     const clampedDelta = Math.min(delta, 0.1);
+    const animTime = this.clock.getElapsedTime();
 
     // FPS calculation
     this.frameCount++;
@@ -1142,29 +1908,35 @@ export class GameEngine {
       this.lastFpsTime = now;
     }
 
-    // 1. Update Stamina & Action timers
+    // 1. Update Cooldowns, Timers & Stamina
     if (this.stats.stamina < this.stats.maxStamina) {
       const regenRate = this.stats.isSprinting ? 0 : 18;
       this.stats.stamina = Math.min(this.stats.maxStamina, this.stats.stamina + regenRate * clampedDelta);
     }
 
-    if (this.actionTimer > 0) {
-      this.actionTimer -= clampedDelta;
-      if (this.actionTimer <= 0) {
-        if (this.playerAction !== 'DEAD') {
-          this.playerAction = 'IDLE';
-          this.stats.isInvulnerable = false;
-          this.stats.isParrying = false;
-        }
+    // Cooldowns
+    this.dodgeCooldownTimer = Math.max(0, this.dodgeCooldownTimer - clampedDelta);
+    this.stats.dodgeCooldown = this.dodgeCooldownTimer;
+    this.swordDashCooldownTimer = Math.max(0, this.swordDashCooldownTimer - clampedDelta);
+    this.stats.swordDashCooldown = this.swordDashCooldownTimer;
+    this.stats.isSwordEquipped = this.isSwordEquipped;
+    this.stats.isCrawling = this.isCrawlInputActive;
+    this.stats.canDoubleJump = !this.isGrounded && this.doubleJumpAvailable && !this.isDoubleJumping;
+
+    if (this.hitStunTimer > 0) {
+      this.hitStunTimer -= clampedDelta;
+      if (this.hitStunTimer <= 0) {
+        this.isHitStunned = false;
       }
     }
 
-    if (this.comboWindowTimer > 0) {
-      this.comboWindowTimer -= clampedDelta;
-      if (this.comboWindowTimer <= 0) {
-        this.comboStep = 0;
-        this.stats.comboCount = 0;
-        this.stats.comboMultiplier = 1.0;
+    if (this.isDodging) {
+      this.dodgeTimer -= clampedDelta;
+      if (this.dodgeTimer <= 0) {
+        this.isDodging = false;
+        this.stats.isInvulnerable = false;
+        this.dodgeCooldownTimer = 0.25;
+        this.stats.dodgeCooldown = 0.25;
       }
     }
 
@@ -1175,9 +1947,47 @@ export class GameEngine {
       }
     }
 
-    // 2. Player Movement Physics
+    // Attack timer & input buffer execution
+    if (this.isAttacking) {
+      this.attackAnimTime += clampedDelta;
+
+      // Check if buffered attack can fire inside combo window
+      if (
+        this.inputBufferAttack &&
+        !this.comboAdvanced &&
+        this.attackAnimTime >= this.comboWindowStart &&
+        this.attackAnimTime <= this.comboWindowEnd
+      ) {
+        if (this.isSwordEquipped) {
+          this.triggerSwordAttack();
+        } else {
+          this.advanceUnarmedCombo();
+        }
+      }
+
+      // Check attack duration expiry
+      if (this.attackAnimTime >= this.attackAnimDuration) {
+        this.isAttacking = false;
+        this.isDrawingSword = false;
+        this.isSwordDashing = false;
+        this.activeAttackClipName = '';
+        if (this.unarmedComboStep === 4) {
+          this.unarmedComboStep = 0;
+          this.stats.comboCount = 0;
+        }
+      }
+    }
+
+    if (this.isLanding) {
+      this.landingTimer -= clampedDelta;
+      if (this.landingTimer <= 0) {
+        this.isLanding = false;
+      }
+    }
+
+    // 2. Locomotion & Physics
     const isSprint = (this.sprintToggled || this.inputVector.magnitude >= this.joystickConfig.sprintThreshold) && this.stats.stamina > 5;
-    this.stats.isSprinting = isSprint && this.inputVector.magnitude > 0.2;
+    this.stats.isSprinting = isSprint && this.inputVector.magnitude > 0.2 && !this.isCrawlInputActive;
 
     if (isSprint && this.stats.isSprinting) {
       this.stats.stamina = Math.max(0, this.stats.stamina - 10 * clampedDelta);
@@ -1185,17 +1995,31 @@ export class GameEngine {
 
     const moveSpeed = isSprint ? 8.5 : 5.2;
 
-    if (
-      this.playerAction === 'IDLE' ||
-      this.playerAction === 'RUN' ||
-      this.playerAction === 'SPRINT'
-    ) {
+    if (this.isDead) {
+      this.playerVelocity.set(0, 0, 0);
+    } else if (this.isDodging) {
+      this.playerVelocity.x *= 0.94;
+      this.playerVelocity.z *= 0.94;
+    } else if (this.isHitStunned) {
+      this.playerVelocity.x *= 0.6;
+      this.playerVelocity.z *= 0.6;
+    } else if (this.isSwordDashing) {
+      this.playerVelocity.x *= 0.96;
+      this.playerVelocity.z *= 0.96;
+    } else if (this.isAttacking && this.isGrounded) {
+      // Clamp/stop movement during ground attack strike
+      this.playerVelocity.x *= 0.3;
+      this.playerVelocity.z *= 0.3;
+    } else if (this.isCrawlInputActive && this.isGrounded) {
+      // Slow backward movement
+      const crawlSpeed = 2.0;
+      this.playerVelocity.x = -Math.sin(this.playerRotationY) * crawlSpeed;
+      this.playerVelocity.z = -Math.cos(this.playerRotationY) * crawlSpeed;
+    } else {
       if (this.inputVector.magnitude > 0.05) {
-        // Calculate movement angle relative to camera yaw
         const stickAngle = Math.atan2(this.inputVector.x, this.inputVector.y);
         const targetRotation = stickAngle + this.cameraYaw;
 
-        // Smooth rotation
         let diff = targetRotation - this.playerRotationY;
         while (diff < -Math.PI) diff += Math.PI * 2;
         while (diff > Math.PI) diff -= Math.PI * 2;
@@ -1206,19 +2030,10 @@ export class GameEngine {
 
         this.playerVelocity.x = Math.sin(this.playerRotationY) * speed;
         this.playerVelocity.z = Math.cos(this.playerRotationY) * speed;
-        this.playerAction = isSprint ? 'SPRINT' : 'RUN';
       } else {
         this.playerVelocity.x *= 0.75;
         this.playerVelocity.z *= 0.75;
-        this.playerAction = 'IDLE';
       }
-    } else if (this.playerAction === 'DODGE_ROLL') {
-      // Roll maintains momentum
-      this.playerVelocity.x *= 0.94;
-      this.playerVelocity.z *= 0.94;
-    } else {
-      this.playerVelocity.x *= 0.5;
-      this.playerVelocity.z *= 0.5;
     }
 
     // Gravity & Vertical Physics
@@ -1228,7 +2043,21 @@ export class GameEngine {
       if (this.playerPosition.y <= 0) {
         this.playerPosition.y = 0;
         this.playerVy = 0;
+        const wasAirborne = !this.isGrounded;
         this.isGrounded = true;
+        this.isJumping = false;
+        this.isDoubleJumping = false;
+        this.doubleJumpAvailable = true;
+
+        if (wasAirborne) {
+          if (this.stats.isSprinting && this.inputVector.magnitude > 0.2) {
+            // Cancel landing directly into sprint
+            this.isLanding = false;
+          } else if (!this.isAttacking && !this.isDodging && !this.isHitStunned) {
+            this.isLanding = true;
+            this.landingTimer = 0.20;
+          }
+        }
       }
     }
 
@@ -1242,36 +2071,141 @@ export class GameEngine {
     this.playerGroup.position.copy(this.playerPosition);
     this.playerGroup.rotation.y = this.playerRotationY;
 
-    // 3. Player Model Procedural Animation
-    const animTime = this.clock.getElapsedTime();
-    if (this.playerAction === 'RUN' || this.playerAction === 'SPRINT') {
-      const strideFreq = this.playerAction === 'SPRINT' ? 14 : 9;
-      this.playerLeftLeg.rotation.x = Math.sin(animTime * strideFreq) * 0.65;
-      this.playerRightLeg.rotation.x = -Math.sin(animTime * strideFreq) * 0.65;
-      this.playerLeftArm.rotation.x = -Math.sin(animTime * strideFreq) * 0.45;
-      this.playerRightArm.rotation.x = Math.sin(animTime * strideFreq) * 0.45;
-      this.playerCape.rotation.x = 0.4 + Math.sin(animTime * strideFreq) * 0.25;
-      this.playerTorso.position.y = 1.55 + Math.abs(Math.sin(animTime * strideFreq)) * 0.08;
-    } else if (this.playerAction === 'IDLE') {
-      this.playerLeftLeg.rotation.x = 0;
-      this.playerRightLeg.rotation.x = 0;
-      this.playerLeftArm.rotation.x = 0;
-      this.playerRightArm.rotation.x = 0;
-      this.playerTorso.position.y = 1.55 + Math.sin(animTime * 2.5) * 0.03;
-      this.playerCape.rotation.x = 0.15 + Math.sin(animTime * 2) * 0.05;
-    } else if (this.playerAction === 'ATTACK_1') {
-      this.playerRightArm.rotation.z = -0.8;
-      this.playerRightArm.rotation.y = Math.sin((0.32 - this.actionTimer) * 12) * 1.6;
-    } else if (this.playerAction === 'ATTACK_2') {
-      this.playerRightArm.rotation.z = 0.8;
-      this.playerRightArm.rotation.y = -Math.sin((0.32 - this.actionTimer) * 12) * 1.6;
-    } else if (this.playerAction === 'ATTACK_3' || this.playerAction === 'HEAVY_CLEAVE') {
-      this.playerRightArm.rotation.x = -Math.PI * 0.7 + (1.0 - this.actionTimer) * Math.PI;
-    } else if (this.playerAction === 'PARRY') {
-      this.playerLeftArm.position.set(-0.2, 0.4, 0.3);
-      this.playerLeftArm.rotation.y = 0.6;
-    } else if (this.playerAction === 'DODGE_ROLL') {
-      this.playerTorso.rotation.x = (0.42 - this.actionTimer) * Math.PI * 4;
+    // 3. PRIORITY-BASED SKELETAL ANIMATION CONTROLLER
+    // "Death" > "Dodge_Roll" > "Hit Stomach" > "Attack/Sword Attack" > "Jump/Air" > "Sprint" > "Walk" > "Idle"
+    let selectedClipName = 'Idle';
+    let blendDuration = 0.12;
+
+    if (this.isDead || this.stats.hp <= 0) {
+      // 1. DEATH (Top Priority)
+      selectedClipName = 'Death';
+      blendDuration = 0.05;
+      this.primaryAnimState = 'DEATH';
+      this.playerAction = 'DEAD';
+    } else if (this.isDodging) {
+      // 2. DODGE ROLL
+      selectedClipName = 'Ninja Jump Double';
+      blendDuration = 0.05;
+      this.primaryAnimState = 'DODGE_ROLL';
+      this.playerAction = 'DODGE_ROLL';
+    } else if (this.isHitStunned) {
+      // 3. HIT STOMACH
+      selectedClipName = 'Hit Stomach';
+      blendDuration = 0.05;
+      this.primaryAnimState = 'HIT_STOMACH';
+      this.playerAction = 'HIT_STOMACH';
+    } else if (this.isAttacking && this.activeAttackClipName) {
+      // 4. ATTACK / SWORD ATTACK
+      selectedClipName = this.activeAttackClipName;
+      blendDuration = 0.06;
+      this.primaryAnimState = 'ATTACK';
+      this.playerAction = 'ATTACK_1';
+    } else if (!this.isGrounded || this.isJumping || this.isDoubleJumping || this.isLanding) {
+      // 5. JUMP / AIRBORNE
+      if (this.isDoubleJumping) {
+        selectedClipName = 'Ninja Jump Double';
+        blendDuration = 0.06;
+      } else if (this.isLanding) {
+        selectedClipName = 'Jump Land';
+        blendDuration = 0.08;
+      } else {
+        selectedClipName = 'Jump Start';
+        blendDuration = 0.08;
+      }
+      this.primaryAnimState = 'JUMP';
+      this.playerAction = 'JUMP';
+    } else if (this.isCrawlInputActive) {
+      // 15. CRAWL BACKWARD
+      selectedClipName = 'Crawl Backward';
+      blendDuration = 0.12;
+      this.primaryAnimState = 'CRAWL_BACKWARD';
+      this.playerAction = 'CRAWL_BACKWARD';
+    } else if (this.stats.isSprinting && this.inputVector.magnitude > 0.05) {
+      // 6. SPRINT
+      selectedClipName = 'Sprint';
+      blendDuration = 0.10;
+      this.primaryAnimState = 'SPRINT';
+      this.playerAction = 'SPRINT';
+    } else if (this.inputVector.magnitude > 0.05) {
+      // 7. WALK
+      selectedClipName = 'Walk (mocap)';
+      blendDuration = 0.12;
+      this.primaryAnimState = 'WALK';
+      this.playerAction = 'RUN';
+    } else {
+      // 8. IDLE
+      selectedClipName = 'Idle';
+      blendDuration = 0.14;
+      this.primaryAnimState = 'IDLE';
+      this.playerAction = 'IDLE';
+    }
+
+    if (this.animationMixer && this.modelConfig.useEmbeddedAnimations) {
+      this.animationMixer.update(clampedDelta);
+      this.playAshAnimation(selectedClipName, blendDuration);
+    } else if (this.customModelGroup) {
+      // Procedural animations for custom static mesh models
+      const animTime = this.clock.getElapsedTime();
+      const baseRotY = (this.modelConfig.rotationOffsetY * Math.PI) / 180;
+      const currentAction = this.playerAction as string;
+
+      if (currentAction === 'RUN' || currentAction === 'SPRINT') {
+        const strideFreq = currentAction === 'SPRINT' ? 14 : 9;
+        this.customModelGroup.rotation.z = Math.sin(animTime * strideFreq) * 0.08;
+        this.customModelGroup.rotation.y = baseRotY;
+        this.customModelGroup.position.y = this.modelConfig.yOffset + Math.abs(Math.sin(animTime * strideFreq)) * 0.08;
+      } else if (currentAction === 'IDLE') {
+        this.customModelGroup.rotation.z = 0;
+        this.customModelGroup.rotation.x = 0;
+        this.customModelGroup.rotation.y = baseRotY;
+        this.customModelGroup.position.y = this.modelConfig.yOffset + Math.sin(animTime * 2.5) * 0.03;
+      } else if (
+        currentAction === 'ATTACK_1' ||
+        currentAction === 'ATTACK_2' ||
+        currentAction === 'ATTACK_3' ||
+        currentAction === 'HEAVY_CLEAVE'
+      ) {
+        this.customModelGroup.rotation.y = baseRotY + Math.sin((0.32 - this.actionTimer) * 12) * 0.4;
+      } else if (currentAction === 'DODGE_ROLL') {
+        this.customModelGroup.rotation.x = (0.42 - this.actionTimer) * Math.PI * 4;
+      } else {
+        this.customModelGroup.rotation.x = 0;
+        this.customModelGroup.rotation.z = 0;
+        this.customModelGroup.rotation.y = baseRotY;
+      }
+    } else {
+      // Default procedural knight articulation
+      const animTime = this.clock.getElapsedTime();
+      const currentAction = this.playerAction as string;
+      if (currentAction === 'RUN' || currentAction === 'SPRINT') {
+        const strideFreq = currentAction === 'SPRINT' ? 14 : 9;
+        this.playerLeftLeg.rotation.x = Math.sin(animTime * strideFreq) * 0.65;
+        this.playerRightLeg.rotation.x = -Math.sin(animTime * strideFreq) * 0.65;
+        this.playerLeftArm.rotation.x = -Math.sin(animTime * strideFreq) * 0.45;
+        this.playerRightArm.rotation.x = Math.sin(animTime * strideFreq) * 0.45;
+        this.playerCape.rotation.x = 0.4 + Math.sin(animTime * strideFreq) * 0.25;
+        this.playerTorso.position.y = 1.55 + Math.abs(Math.sin(animTime * strideFreq)) * 0.08;
+      } else if (currentAction === 'IDLE') {
+        this.playerLeftLeg.rotation.x = 0;
+        this.playerRightLeg.rotation.x = 0;
+        this.playerLeftArm.rotation.x = 0;
+        this.playerRightArm.rotation.x = 0;
+        this.playerTorso.position.y = 1.55 + Math.sin(animTime * 2.5) * 0.03;
+        this.playerCape.rotation.x = 0.15 + Math.sin(animTime * 2) * 0.05;
+      } else if (currentAction === 'ATTACK_1') {
+        this.playerRightArm.rotation.z = -0.8;
+        this.playerRightArm.rotation.y = Math.sin((0.32 - this.actionTimer) * 12) * 1.6;
+      } else if (currentAction === 'ATTACK_2') {
+        this.playerRightArm.rotation.z = 0.8;
+        this.playerRightArm.rotation.y = -Math.sin((0.32 - this.actionTimer) * 12) * 1.6;
+      } else if (currentAction === 'ATTACK_3' || currentAction === 'HEAVY_CLEAVE') {
+        this.playerRightArm.rotation.x = -Math.PI * 0.7 + (1.0 - this.actionTimer) * Math.PI;
+      } else if (currentAction === 'PARRY') {
+        this.playerLeftArm.position.set(-0.2, 0.4, 0.3);
+        this.playerLeftArm.rotation.y = 0.6;
+      } else if (currentAction === 'DODGE_ROLL') {
+        this.playerTorso.rotation.x = (0.42 - this.actionTimer) * Math.PI * 4;
+      }
     }
 
     // Fade out sword arc

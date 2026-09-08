@@ -25,6 +25,9 @@ interface TouchCombatControlsProps {
   onToggleSprint: () => void;
   onToggleLockOn: () => void;
   onQuickTurn: () => void;
+  onToggleSword?: () => void;
+  onSwordDash?: () => void;
+  onToggleCrawl?: () => void;
   className?: string;
 }
 
@@ -41,17 +44,46 @@ export const TouchCombatControls: React.FC<TouchCombatControlsProps> = ({
   onToggleSprint,
   onToggleLockOn,
   onQuickTurn,
+  onToggleSword,
+  onSwordDash,
+  onToggleCrawl,
   className = '',
 }) => {
   const canRuneBurst = stats.runes >= 30;
   const hasPotions = stats.potions > 0;
-  const hasStaminaForRoll = stats.stamina >= 20;
-  const hasStaminaForHeavy = stats.stamina >= 28;
+  const hasStaminaForRoll = stats.stamina >= 18;
+  const hasStaminaForHeavy = stats.stamina >= 20;
 
   return (
     <div className={`relative pointer-events-auto touch-none select-none ${className}`}>
-      {/* Top Utility Row (Lock-on, 180 Turn, Sprint Toggle) */}
-      <div className="absolute right-6 -top-16 flex items-center gap-3">
+      {/* Top Utility Row (Sword Draw/Sheathe, Crawl, Sprint, Lock-on, 180 Turn, Estus) */}
+      <div className="absolute right-6 -top-16 flex items-center gap-2.5">
+        {/* Sword Draw / Sheathe Toggle */}
+        <button
+          onClick={onToggleSword}
+          className={`w-11 h-11 rounded-full glass-button flex items-center justify-center border transition-all active:scale-90 ${
+            stats.isSwordEquipped
+              ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.5)]'
+              : 'border-ashen-600/50 text-ashen-400 bg-ashen-900/50'
+          }`}
+          title={stats.isSwordEquipped ? 'Sheathe Sword' : 'Draw Sword (Sword Enter)'}
+        >
+          <Sword className={`w-5 h-5 ${stats.isSwordEquipped ? 'text-cyan-300 rotate-45' : 'text-ashen-400'}`} />
+        </button>
+
+        {/* Crawl Backward Toggle */}
+        <button
+          onClick={onToggleCrawl}
+          className={`w-11 h-11 rounded-full glass-button flex items-center justify-center border transition-all active:scale-90 ${
+            stats.isCrawling
+              ? 'border-amber-400 bg-amber-950/60 text-amber-200 shadow-[0_0_12px_rgba(245,158,11,0.5)]'
+              : 'border-ashen-600/50 text-ashen-400 bg-ashen-900/50'
+          }`}
+          title="Crawl Backward"
+        >
+          <Footprints className="w-5 h-5 rotate-180" />
+        </button>
+
         {/* Quick 180 Turn */}
         <button
           onClick={onQuickTurn}
@@ -114,7 +146,7 @@ export const TouchCombatControls: React.FC<TouchCombatControlsProps> = ({
         >
           <Sword className="w-9 h-9 text-cyan-200" />
           <span className="text-[10px] font-bold font-medieval tracking-wider uppercase text-cyan-200 mt-0.5">
-            Attack
+            {stats.isSwordEquipped ? 'Slash' : 'Attack'}
           </span>
           {stats.comboCount > 0 && (
             <span className="absolute -top-1.5 -left-1.5 bg-cyan-500 text-ashen-950 text-[10px] font-extrabold px-2 py-0.5 rounded-full shadow border border-cyan-200 animate-bounce">
@@ -123,19 +155,21 @@ export const TouchCombatControls: React.FC<TouchCombatControlsProps> = ({
           )}
         </button>
 
-        {/* Top: Heavy Cleave */}
+        {/* Top: Sword Dash (or Heavy Cleave) */}
         <button
-          onClick={onHeavyCleave}
-          disabled={!hasStaminaForHeavy}
+          onClick={stats.isSwordEquipped ? (onSwordDash || onHeavyCleave) : onHeavyCleave}
+          disabled={!hasStaminaForHeavy || (stats.swordDashCooldown || 0) > 0}
           className={`absolute top-0 left-16 w-14 h-14 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 ${
-            hasStaminaForHeavy
+            hasStaminaForHeavy && (stats.swordDashCooldown || 0) <= 0
               ? 'border-amber-500/80 bg-amber-950/40 text-amber-300 shadow-[0_0_14px_rgba(245,158,11,0.35)]'
               : 'border-ashen-800 bg-ashen-950/40 text-ashen-600 opacity-50'
           }`}
-          title="Heavy Cleave Strike"
+          title={stats.isSwordEquipped ? 'Sword Dash Root Motion' : 'Heavy Cleave Strike'}
         >
           <Flame className="w-6 h-6 text-amber-400" />
-          <span className="text-[8px] font-bold tracking-wider uppercase text-amber-200">Heavy</span>
+          <span className="text-[8px] font-bold tracking-wider uppercase text-amber-200">
+            {stats.isSwordEquipped ? 'Dash' : 'Heavy'}
+          </span>
         </button>
 
         {/* Bottom: Rune Burst AoE */}
@@ -166,9 +200,9 @@ export const TouchCombatControls: React.FC<TouchCombatControlsProps> = ({
         {/* Left-Bottom: Dodge Roll */}
         <button
           onClick={onDodgeRoll}
-          disabled={!hasStaminaForRoll}
+          disabled={!hasStaminaForRoll || (stats.dodgeCooldown || 0) > 0}
           className={`absolute bottom-10 left-0 w-14 h-14 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 ${
-            hasStaminaForRoll
+            hasStaminaForRoll && (stats.dodgeCooldown || 0) <= 0
               ? 'border-emerald-400/70 bg-emerald-950/40 text-emerald-200 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
               : 'border-ashen-800 bg-ashen-950/40 text-ashen-600 opacity-50'
           }`}
@@ -178,14 +212,20 @@ export const TouchCombatControls: React.FC<TouchCombatControlsProps> = ({
           <span className="text-[8px] font-bold tracking-wider uppercase text-emerald-200">Roll</span>
         </button>
 
-        {/* Center-Left: Jump */}
+        {/* Center-Left: Jump (or Double Jump) */}
         <button
           onClick={onJump}
-          className="absolute top-1/2 -translate-y-1/2 left-10 w-12 h-12 rounded-full glass-button border border-ashen-500/60 bg-ashen-900/60 text-ashen-200 flex flex-col items-center justify-center active:scale-90"
-          title="Jump"
+          className={`absolute top-1/2 -translate-y-1/2 left-10 w-12 h-12 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 ${
+            stats.canDoubleJump
+              ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 shadow-[0_0_10px_rgba(34,211,238,0.4)]'
+              : 'border-ashen-500/60 bg-ashen-900/60 text-ashen-200'
+          }`}
+          title={stats.canDoubleJump ? 'Double Jump (Ninja Jump Double)' : 'Jump (Jump Start)'}
         >
-          <ArrowUp className="w-5 h-5 text-ashen-300" />
-          <span className="text-[8px] font-bold tracking-wider uppercase text-ashen-300">Jump</span>
+          <ArrowUp className={`w-5 h-5 ${stats.canDoubleJump ? 'text-cyan-300 animate-bounce' : 'text-ashen-300'}`} />
+          <span className="text-[7px] font-bold tracking-wider uppercase text-ashen-200">
+            {stats.canDoubleJump ? 'D-Jump' : 'Jump'}
+          </span>
         </button>
       </div>
     </div>

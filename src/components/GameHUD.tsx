@@ -9,6 +9,7 @@ import {
   Flame,
   Zap,
   Award,
+  User,
 } from 'lucide-react';
 
 interface GameHUDProps {
@@ -21,6 +22,7 @@ interface GameHUDProps {
   onToggleMute: () => void;
   onOpenCalibration: () => void;
   onOpenAndroidModal: () => void;
+  onOpenCharacterModal?: () => void;
 }
 
 export const GameHUD: React.FC<GameHUDProps> = ({
@@ -33,6 +35,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onToggleMute,
   onOpenCalibration,
   onOpenAndroidModal,
+  onOpenCharacterModal,
 }) => {
   const hpPercent = Math.max(0, Math.min(100, (stats.hp / stats.maxHp) * 100));
   const staminaPercent = Math.max(0, Math.min(100, (stats.stamina / stats.maxStamina) * 100));
@@ -127,6 +130,18 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           <div className="hidden sm:block text-[10px] font-mono font-bold text-emerald-400 bg-ashen-900/80 px-2.5 py-1.5 rounded-xl border border-ashen-700 shadow">
             {fps} FPS
           </div>
+
+          {/* Custom Hero / Character 3D Model Upload Modal */}
+          {onOpenCharacterModal && (
+            <button
+              onClick={onOpenCharacterModal}
+              className="px-3 h-10 rounded-xl glass-button flex items-center gap-1.5 text-xs font-bold text-purple-300 border-purple-500/40 hover:bg-purple-500/20 shadow-[0_0_10px_rgba(168,85,247,0.25)]"
+              title="Custom 3D Main Character (.glb)"
+            >
+              <User className="w-4 h-4 text-purple-400" />
+              <span className="hidden md:inline font-medieval">Hero .GLB</span>
+            </button>
+          )}
 
           {/* Sound Mute Toggle */}
           <button
