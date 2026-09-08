@@ -77,10 +77,10 @@ jobs:
           else
             npm install
           fi
-          npm run build --if-present
-          if command -v npx &> /dev/null && ([ -f "capacitor.config.json" ] || [ -f "capacitor.config.ts" ]); then
+          npm run build
+          if command -v npx &> /dev.null && ([ -f "capacitor.config.json" ] || [ -f "capacitor.config.ts" ]); then
             echo "Syncing web assets to native Android project..."
-            npx cap sync android || true
+            npx cap sync android
           fi
 
       - name: Set up Java 17
@@ -141,6 +141,16 @@ jobs:
               exit 1
             fi
           done
+
+          echo "== Inspecting APK contents for required game assets =="
+          UNZIP_LIST=$(unzip -l "$PRIMARY_APK")
+          echo "$UNZIP_LIST" | grep -E "\.glb|\.gltf|\.png|\.jpg|\.json|\.css|\.js" | head -n 30 || true
+
+          if ! echo "$UNZIP_LIST" | grep -iE "Ash\.glb|player\.glb" > /dev/null; then
+            echo "::error::Required 3D game assets (.glb) missing from packaged APK!"
+            exit 1
+          fi
+          echo "✓ Verified required 3D model assets are present in the packaged APK."
 
           mkdir -p build-artifacts
           cp "$PRIMARY_APK" build-artifacts/
