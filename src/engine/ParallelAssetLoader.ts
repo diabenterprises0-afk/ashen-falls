@@ -126,11 +126,17 @@ export class ParallelAssetLoader {
       console.warn('CacheStorage check skipped:', e);
     }
 
-    // 2. Candidate paths in prioritized order
+    // 2. Candidate paths in prioritized order (including relative fallbacks for local/Capacitor file loading)
     const candidateUrls = [
+      'models/Ash.glb',
+      './models/Ash.glb',
       '/models/Ash.glb',
+      'assets/characters/player.glb',
+      './assets/characters/player.glb',
       '/assets/characters/player.glb',
+      'public/models/Ash.glb',
       '/public/models/Ash.glb',
+      'assets/characters/Ash.glb',
       '/assets/characters/Ash.glb',
     ];
 
@@ -571,15 +577,34 @@ export class ParallelAssetLoader {
   private async loadAshenCrestTexture(): Promise<THREE.Texture | undefined> {
     return new Promise(resolve => {
       const loader = new THREE.TextureLoader();
-      loader.load(
+      const crestUrls = [
+        'ashen-crest.svg',
+        './ashen-crest.svg',
         '/ashen-crest.svg',
-        tex => {
-          tex.colorSpace = THREE.SRGBColorSpace;
-          resolve(tex);
-        },
-        undefined,
-        () => resolve(undefined)
-      );
+        'public/ashen-crest.svg',
+        '/public/ashen-crest.svg',
+      ];
+      let loaded = false;
+
+      const tryNext = (idx: number) => {
+        if (idx >= crestUrls.length) {
+          resolve(undefined);
+          return;
+        }
+        loader.load(
+          crestUrls[idx],
+          tex => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            loaded = true;
+            resolve(tex);
+          },
+          undefined,
+          () => {
+            if (!loaded) tryNext(idx + 1);
+          }
+        );
+      };
+      tryNext(0);
     });
   }
 

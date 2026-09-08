@@ -870,6 +870,9 @@ export class GameEngine {
           if (mat.roughness !== undefined && mat.roughness < 0.2) {
             mat.roughness = 0.25;
           }
+          if (mat.color && mat.color.r === 0 && mat.color.g === 0 && mat.color.b === 0 && !mat.map) {
+            mat.color.setHex(0x333333); // Prevent pitch-black untextured sub-meshes
+          }
           mat.envMapIntensity = 1.25;
           mat.needsUpdate = true;
         }
@@ -2234,14 +2237,19 @@ export class GameEngine {
     this.playerPosition.x += this.playerVelocity.x * clampedDelta;
     this.playerPosition.z += this.playerVelocity.z * clampedDelta;
 
-    // Obstacle capsule collision (tangent wall-sliding)
+    // Obstacle capsule collision (tangent wall-sliding & zero-distance anti-stuck)
     for (let i = 0; i < this.arenaObstacles.length; i++) {
       const obs = this.arenaObstacles[i];
-      const dx = this.playerPosition.x - obs.x;
-      const dz = this.playerPosition.z - obs.z;
-      const distSq = dx * dx + dz * dz;
+      let dx = this.playerPosition.x - obs.x;
+      let dz = this.playerPosition.z - obs.z;
+      let distSq = dx * dx + dz * dz;
       const minD = obs.radius;
-      if (distSq < minD * minD && distSq > 0.0001) {
+      if (distSq < minD * minD) {
+        if (distSq < 0.0001) {
+          dx = 0.01;
+          dz = 0.01;
+          distSq = dx * dx + dz * dz;
+        }
         const dist = Math.sqrt(distSq);
         const nx = dx / dist;
         const nz = dz / dist;
@@ -2585,8 +2593,12 @@ export class GameEngine {
 
     const loop = () => {
       if (!this.isRunning) return;
-      const delta = this.clock.getDelta();
-      this.update(delta);
+      try {
+        const delta = this.clock.getDelta();
+        this.update(delta);
+      } catch (err) {
+        console.error('Error in render loop:', err);
+      }
       this.animationFrameId = requestAnimationFrame(loop);
     };
     loop();
