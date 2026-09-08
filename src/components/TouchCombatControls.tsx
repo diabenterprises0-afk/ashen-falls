@@ -11,6 +11,7 @@ import {
   FlaskConical,
   Footprints,
 } from 'lucide-react';
+import { triggerHaptic } from '../utils/storage';
 
 interface TouchCombatControlsProps {
   stats: PlayerStats;
@@ -46,7 +47,6 @@ export const TouchCombatControls: React.FC<TouchCombatControlsProps> = ({
   onQuickTurn,
   onToggleSword,
   onSwordDash,
-  onToggleCrawl,
   className = '',
 }) => {
   const canRuneBurst = stats.runes >= 30;
@@ -56,50 +56,46 @@ export const TouchCombatControls: React.FC<TouchCombatControlsProps> = ({
 
   return (
     <div className={`relative pointer-events-auto touch-none select-none ${className}`}>
-      {/* Top Utility Row (Sword Draw/Sheathe, Crawl, Sprint, Lock-on, 180 Turn, Estus) */}
-      <div className="absolute right-6 -top-16 flex items-center gap-2.5">
+      {/* Top Utility Belt (Potion, Lock-On, Sprint, Sword Toggle, 180 Turn) */}
+      <div className="flex items-center justify-end gap-2 sm:gap-3 mb-3 pr-2">
         {/* Sword Draw / Sheathe Toggle */}
         <button
-          onClick={onToggleSword}
-          className={`w-11 h-11 rounded-full glass-button flex items-center justify-center border transition-all active:scale-90 ${
+          onClick={() => {
+            triggerHaptic(15);
+            onToggleSword?.();
+          }}
+          className={`w-11 h-11 rounded-2xl glass-button flex items-center justify-center border transition-all active:scale-90 shadow ${
             stats.isSwordEquipped
-              ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.5)]'
-              : 'border-ashen-600/50 text-ashen-400 bg-ashen-900/50'
+              ? 'border-cyan-400 bg-cyan-950/70 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.5)]'
+              : 'border-ashen-700/60 text-ashen-400 bg-ashen-950/60'
           }`}
-          title={stats.isSwordEquipped ? 'Sheathe Sword' : 'Draw Sword (Sword Enter)'}
+          title={stats.isSwordEquipped ? 'Sheathe Sword' : 'Draw Runic Sword'}
         >
           <Sword className={`w-5 h-5 ${stats.isSwordEquipped ? 'text-cyan-300 rotate-45' : 'text-ashen-400'}`} />
         </button>
 
-        {/* Crawl Backward Toggle */}
-        <button
-          onClick={onToggleCrawl}
-          className={`w-11 h-11 rounded-full glass-button flex items-center justify-center border transition-all active:scale-90 ${
-            stats.isCrawling
-              ? 'border-amber-400 bg-amber-950/60 text-amber-200 shadow-[0_0_12px_rgba(245,158,11,0.5)]'
-              : 'border-ashen-600/50 text-ashen-400 bg-ashen-900/50'
-          }`}
-          title="Crawl Backward"
-        >
-          <Footprints className="w-5 h-5 rotate-180" />
-        </button>
-
         {/* Quick 180 Turn */}
         <button
-          onClick={onQuickTurn}
-          className="w-11 h-11 rounded-full glass-button flex items-center justify-center text-ashen-200 border-ashen-600/50 active:scale-90 active:bg-ashen-600"
-          title="Quick 180 Turn"
+          onClick={() => {
+            triggerHaptic(15);
+            onQuickTurn();
+          }}
+          className="w-11 h-11 rounded-2xl glass-button flex items-center justify-center text-ashen-200 border border-ashen-700/60 bg-ashen-950/60 active:scale-90 shadow"
+          title="Quick 180° Turn"
         >
           <RotateCcw className="w-5 h-5 text-ashen-300" />
         </button>
 
         {/* Lock On Target */}
         <button
-          onClick={onToggleLockOn}
-          className={`w-11 h-11 rounded-full glass-button flex items-center justify-center border transition-all active:scale-90 ${
+          onClick={() => {
+            triggerHaptic(15);
+            onToggleLockOn();
+          }}
+          className={`w-11 h-11 rounded-2xl glass-button flex items-center justify-center border transition-all active:scale-90 shadow ${
             isLockedOn
-              ? 'border-cyanGlow-400 bg-cyanGlow-500/30 text-cyanGlow-300 shadow-[0_0_12px_rgba(34,211,238,0.5)]'
-              : 'border-ashen-600/50 text-ashen-300'
+              ? 'border-cyan-400 bg-cyan-950/70 text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.5)]'
+              : 'border-ashen-700/60 text-ashen-300 bg-ashen-950/60'
           }`}
           title="Target Lock-On"
         >
@@ -108,121 +104,154 @@ export const TouchCombatControls: React.FC<TouchCombatControlsProps> = ({
 
         {/* Sprint Toggle */}
         <button
-          onClick={onToggleSprint}
-          className={`w-11 h-11 rounded-full glass-button flex items-center justify-center border transition-all active:scale-90 ${
+          onClick={() => {
+            triggerHaptic(15);
+            onToggleSprint();
+          }}
+          className={`w-11 h-11 rounded-2xl glass-button flex items-center justify-center border transition-all active:scale-90 shadow ${
             stats.isSprinting
-              ? 'border-ember-500 bg-ember-500/30 text-ember-300 shadow-[0_0_12px_rgba(255,87,34,0.5)]'
-              : 'border-ashen-600/50 text-ashen-300'
+              ? 'border-amber-400 bg-amber-950/70 text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.5)]'
+              : 'border-ashen-700/60 text-ashen-300 bg-ashen-950/60'
           }`}
-          title="Toggle Sprint Mode"
+          title="Toggle Sprint"
         >
           <Footprints className="w-5 h-5" />
         </button>
 
-        {/* Estus Potion Flask */}
+        {/* Healing Potion Flask */}
         <button
-          onClick={onHealPotion}
+          onClick={() => {
+            if (hasPotions) {
+              triggerHaptic(25);
+              onHealPotion();
+            }
+          }}
           disabled={!hasPotions}
-          className={`relative w-12 h-12 rounded-full glass-button flex items-center justify-center border transition-all active:scale-90 ${
+          className={`relative w-11 h-11 rounded-2xl glass-button flex items-center justify-center border transition-all active:scale-90 shadow ${
             hasPotions
-              ? 'border-emerald-500/60 bg-emerald-950/40 text-emerald-300 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
-              : 'border-ashen-800 bg-ashen-950/40 text-ashen-600 opacity-50 cursor-not-allowed'
+              ? 'border-emerald-500/60 bg-emerald-950/50 text-emerald-300 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
+              : 'border-ashen-800 bg-ashen-950/50 text-ashen-600 opacity-40 cursor-not-allowed'
           }`}
           title="Drink Healing Potion"
         >
-          <FlaskConical className="w-6 h-6 text-emerald-400" />
-          <span className="absolute -top-1 -right-1 bg-emerald-600 text-white font-bold text-[10px] w-5 h-5 rounded-full flex items-center justify-center border border-emerald-300">
+          <FlaskConical className="w-5 h-5 text-emerald-400" />
+          <span className="absolute -top-1 -right-1 bg-emerald-600 text-white font-bold text-[9px] font-mono w-4 h-4 rounded-full flex items-center justify-center border border-emerald-300">
             {stats.potions}
           </span>
         </button>
       </div>
 
-      {/* Primary Action Button Diamond Cluster */}
-      <div className="relative w-56 h-56 flex items-center justify-center">
-        {/* Center-Right: Primary Light Attack (Large Button) */}
+      {/* Main Action Diamond Cluster */}
+      <div className="relative w-52 h-52 sm:w-56 sm:h-56 flex items-center justify-center">
+        {/* Primary Attack Button (Center-Right, Large) */}
         <button
-          onClick={onLightAttack}
-          className="absolute right-3 top-1/2 -translate-y-1/2 w-20 h-20 rounded-full glass-button border-2 border-cyanGlow-400/80 bg-gradient-to-br from-cyan-900/60 to-ashen-950/80 flex flex-col items-center justify-center shadow-[0_0_20px_rgba(34,211,238,0.4)] active:scale-90 active:bg-cyanGlow-500/40 z-20"
+          onClick={() => {
+            triggerHaptic(20);
+            onLightAttack();
+          }}
+          className="absolute right-2 top-1/2 -translate-y-1/2 w-18 h-18 sm:w-20 sm:h-20 rounded-full glass-button border-2 border-cyan-400/80 bg-gradient-to-br from-cyan-900/70 via-ashen-900/90 to-ashen-950 flex flex-col items-center justify-center shadow-[0_0_20px_rgba(34,211,238,0.4)] active:scale-90 z-20"
         >
-          <Sword className="w-9 h-9 text-cyan-200" />
-          <span className="text-[10px] font-bold font-medieval tracking-wider uppercase text-cyan-200 mt-0.5">
+          <Sword className="w-7 h-7 sm:w-8 sm:h-8 text-cyan-200" />
+          <span className="text-[9px] sm:text-[10px] font-bold font-medieval tracking-wider uppercase text-cyan-200 mt-0.5">
             {stats.isSwordEquipped ? 'Slash' : 'Attack'}
           </span>
           {stats.comboCount > 0 && (
-            <span className="absolute -top-1.5 -left-1.5 bg-cyan-500 text-ashen-950 text-[10px] font-extrabold px-2 py-0.5 rounded-full shadow border border-cyan-200 animate-bounce">
+            <span className="absolute -top-1 -left-1 bg-cyan-400 text-ashen-950 text-[10px] font-extrabold px-1.5 py-0.5 rounded-full shadow border border-white animate-bounce">
               {stats.comboCount}x
             </span>
           )}
         </button>
 
-        {/* Top: Sword Dash (or Heavy Cleave) */}
+        {/* Top Button: Heavy / Dash */}
         <button
-          onClick={stats.isSwordEquipped ? (onSwordDash || onHeavyCleave) : onHeavyCleave}
+          onClick={() => {
+            if (hasStaminaForHeavy && (stats.swordDashCooldown || 0) <= 0) {
+              triggerHaptic(30);
+              if (stats.isSwordEquipped && onSwordDash) onSwordDash();
+              else onHeavyCleave();
+            }
+          }}
           disabled={!hasStaminaForHeavy || (stats.swordDashCooldown || 0) > 0}
-          className={`absolute top-0 left-16 w-14 h-14 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 ${
+          className={`absolute top-0 left-14 sm:left-16 w-12 h-12 sm:w-14 sm:h-14 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 shadow ${
             hasStaminaForHeavy && (stats.swordDashCooldown || 0) <= 0
-              ? 'border-amber-500/80 bg-amber-950/40 text-amber-300 shadow-[0_0_14px_rgba(245,158,11,0.35)]'
-              : 'border-ashen-800 bg-ashen-950/40 text-ashen-600 opacity-50'
+              ? 'border-amber-500/80 bg-amber-950/50 text-amber-300 shadow-[0_0_14px_rgba(245,158,11,0.35)]'
+              : 'border-ashen-800 bg-ashen-950/40 text-ashen-600 opacity-40'
           }`}
-          title={stats.isSwordEquipped ? 'Sword Dash Root Motion' : 'Heavy Cleave Strike'}
+          title={stats.isSwordEquipped ? 'Sword Dash' : 'Heavy Cleave'}
         >
-          <Flame className="w-6 h-6 text-amber-400" />
-          <span className="text-[8px] font-bold tracking-wider uppercase text-amber-200">
+          <Flame className="w-5 h-5 text-amber-400" />
+          <span className="text-[7px] sm:text-[8px] font-bold tracking-wider uppercase text-amber-200">
             {stats.isSwordEquipped ? 'Dash' : 'Heavy'}
           </span>
         </button>
 
-        {/* Bottom: Rune Burst AoE */}
+        {/* Bottom Button: Rune Burst AoE */}
         <button
-          onClick={onRuneBurst}
+          onClick={() => {
+            if (canRuneBurst) {
+              triggerHaptic(40);
+              onRuneBurst();
+            }
+          }}
           disabled={!canRuneBurst}
-          className={`absolute bottom-0 left-16 w-14 h-14 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 ${
+          className={`absolute bottom-0 left-14 sm:left-16 w-12 h-12 sm:w-14 sm:h-14 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 shadow ${
             canRuneBurst
-              ? 'border-purple-500/80 bg-purple-950/40 text-purple-300 shadow-[0_0_16px_rgba(168,85,247,0.4)] animate-pulse'
+              ? 'border-purple-500/80 bg-purple-950/50 text-purple-300 shadow-[0_0_16px_rgba(168,85,247,0.4)] animate-pulse'
               : 'border-ashen-800 bg-ashen-950/40 text-ashen-600 opacity-40'
           }`}
-          title="Rune Burst AoE"
+          title="Rune Burst (AoE blast)"
         >
-          <Zap className="w-6 h-6 text-purple-400" />
-          <span className="text-[8px] font-bold tracking-wider uppercase text-purple-200">Rune</span>
+          <Zap className="w-5 h-5 text-purple-400" />
+          <span className="text-[7px] sm:text-[8px] font-bold tracking-wider uppercase text-purple-200">Rune</span>
         </button>
 
-        {/* Left-Top: Parry / Guard Shield */}
+        {/* Left-Top Button: Parry */}
         <button
-          onClick={onParry}
-          className="absolute top-10 left-0 w-14 h-14 rounded-full glass-button border border-blue-400/70 bg-blue-950/40 text-blue-200 flex flex-col items-center justify-center shadow-[0_0_12px_rgba(59,130,246,0.3)] active:scale-90"
-          title="Shield Parry / Guard"
+          onClick={() => {
+            triggerHaptic(20);
+            onParry();
+          }}
+          className="absolute top-8 left-0 w-12 h-12 sm:w-14 sm:h-14 rounded-full glass-button border border-blue-400/70 bg-blue-950/50 text-blue-200 flex flex-col items-center justify-center shadow-[0_0_12px_rgba(59,130,246,0.3)] active:scale-90"
+          title="Shield Parry"
         >
-          <Shield className="w-6 h-6 text-blue-300" />
-          <span className="text-[8px] font-bold tracking-wider uppercase text-blue-200">Parry</span>
+          <Shield className="w-5 h-5 text-blue-300" />
+          <span className="text-[7px] sm:text-[8px] font-bold tracking-wider uppercase text-blue-200">Parry</span>
         </button>
 
-        {/* Left-Bottom: Dodge Roll */}
+        {/* Left-Bottom Button: Dodge Roll */}
         <button
-          onClick={onDodgeRoll}
+          onClick={() => {
+            if (hasStaminaForRoll && (stats.dodgeCooldown || 0) <= 0) {
+              triggerHaptic(20);
+              onDodgeRoll();
+            }
+          }}
           disabled={!hasStaminaForRoll || (stats.dodgeCooldown || 0) > 0}
-          className={`absolute bottom-10 left-0 w-14 h-14 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 ${
+          className={`absolute bottom-8 left-0 w-12 h-12 sm:w-14 sm:h-14 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 shadow ${
             hasStaminaForRoll && (stats.dodgeCooldown || 0) <= 0
-              ? 'border-emerald-400/70 bg-emerald-950/40 text-emerald-200 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
-              : 'border-ashen-800 bg-ashen-950/40 text-ashen-600 opacity-50'
+              ? 'border-emerald-400/70 bg-emerald-950/50 text-emerald-200 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
+              : 'border-ashen-800 bg-ashen-950/40 text-ashen-600 opacity-40'
           }`}
-          title="Evasive Dodge Roll"
+          title="Dodge Roll (Invulnerability)"
         >
-          <RotateCcw className="w-6 h-6 text-emerald-300 rotate-90" />
-          <span className="text-[8px] font-bold tracking-wider uppercase text-emerald-200">Roll</span>
+          <RotateCcw className="w-5 h-5 text-emerald-300 rotate-90" />
+          <span className="text-[7px] sm:text-[8px] font-bold tracking-wider uppercase text-emerald-200">Roll</span>
         </button>
 
-        {/* Center-Left: Jump (or Double Jump) */}
+        {/* Center-Left Button: Jump */}
         <button
-          onClick={onJump}
-          className={`absolute top-1/2 -translate-y-1/2 left-10 w-12 h-12 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 ${
+          onClick={() => {
+            triggerHaptic(15);
+            onJump();
+          }}
+          className={`absolute top-1/2 -translate-y-1/2 left-8 sm:left-9 w-11 h-11 sm:w-12 sm:h-12 rounded-full glass-button border flex flex-col items-center justify-center active:scale-90 shadow ${
             stats.canDoubleJump
-              ? 'border-cyan-400 bg-cyan-950/60 text-cyan-200 shadow-[0_0_10px_rgba(34,211,238,0.4)]'
-              : 'border-ashen-500/60 bg-ashen-900/60 text-ashen-200'
+              ? 'border-cyan-400 bg-cyan-950/70 text-cyan-200 shadow-[0_0_10px_rgba(34,211,238,0.4)]'
+              : 'border-ashen-600/70 bg-ashen-900/60 text-ashen-200'
           }`}
-          title={stats.canDoubleJump ? 'Double Jump (Ninja Jump Double)' : 'Jump (Jump Start)'}
+          title={stats.canDoubleJump ? 'Double Jump' : 'Jump'}
         >
-          <ArrowUp className={`w-5 h-5 ${stats.canDoubleJump ? 'text-cyan-300 animate-bounce' : 'text-ashen-300'}`} />
+          <ArrowUp className={`w-4 h-4 ${stats.canDoubleJump ? 'text-cyan-300 animate-bounce' : 'text-ashen-300'}`} />
           <span className="text-[7px] font-bold tracking-wider uppercase text-ashen-200">
             {stats.canDoubleJump ? 'D-Jump' : 'Jump'}
           </span>

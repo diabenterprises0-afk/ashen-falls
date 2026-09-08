@@ -13,6 +13,7 @@ import {
 } from '../types/game';
 import { soundManager } from '../utils/audio';
 import { triggerHaptic } from '../utils/storage';
+import { parallelAssetLoader, LoadedGameAssets } from './ParallelAssetLoader';
 
 export interface GameEngineCallbacks {
   onStatsUpdate: (stats: PlayerStats) => void;
@@ -150,6 +151,13 @@ export class GameEngine {
   private prevPlayerAction: ActionState = 'IDLE';
   private gltfLoader = new GLTFLoader();
 
+  // Material references for parallel texture streaming
+  private groundMat: THREE.MeshStandardMaterial | null = null;
+  private wallMat: THREE.MeshStandardMaterial | null = null;
+  private stoneMat: THREE.MeshStandardMaterial | null = null;
+  private circleMat: THREE.MeshBasicMaterial | null = null;
+  private loadedAssets: LoadedGameAssets | null = null;
+
   // World objects
   private braziers: { light: THREE.PointLight; mesh: THREE.Group; x: number; z: number }[] = [];
   private enemies: EnemyEntity[] = [];
@@ -162,6 +170,13 @@ export class GameEngine {
     color: THREE.Color;
     size: number;
   }[] = [];
+
+  // Static Collision Obstacles (Pillars, Braziers)
+  private arenaObstacles: { x: number; z: number; radius: number }[] = [];
+
+  // Smooth Camera Vectors
+  private smoothedCamPos = new THREE.Vector3(0, 4, 8);
+  private smoothedCamTarget = new THREE.Vector3(0, 1.5, 0);
 
   // Configs
   public joystickConfig: JoystickConfig;
@@ -203,13 +218,15 @@ export class GameEngine {
 
     // 1. Scene Setup
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x0a0812);
-    this.scene.fog = new THREE.FogExp2(0x0a0812, 0.028);
+    this.scene.background = new THREE.Color(0x0d0f1a);
+    this.scene.fog = new THREE.FogExp2(0x0d0f1a, 0.016);
 
     // 2. Camera Setup
     const aspect = container.clientWidth / container.clientHeight;
-    this.camera = new THREE.PerspectiveCamera(55, aspect, 0.1, 120);
+    this.camera = new THREE.PerspectiveCamera(55, aspect, 0.1, 140);
     this.camera.position.set(0, 4, 8);
+    this.smoothedCamPos.set(0, 4, 8);
+    this.smoothedCamTarget.set(0, 1.5, 0);
 
     // 3. Renderer Setup
     this.renderer = new THREE.WebGLRenderer({
@@ -217,11 +234,12 @@ export class GameEngine {
       powerPreference: 'high-performance',
     });
     this.renderer.setSize(container.clientWidth, container.clientHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, graphics.resolutionScale * 1.5));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, Math.max(1.0, graphics.resolutionScale * 1.5)));
     this.renderer.shadowMap.enabled = graphics.shadows !== 'off';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.1;
+    this.renderer.toneMappingExposure = 1.25;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     // Attach to DOM
     this.container.appendChild(this.renderer.domElement);
@@ -238,14 +256,8 @@ export class GameEngine {
     // 5. Spawn Chapter 1 Enemies
     this.spawnChapterEnemies(1);
 
-    // 6. Automatically probe for /assets/characters/player.glb
-    this.checkAndLoadDefaultGLB();
-
-    // 7. Handle Window Resizing
+    // 6. Handle Window Resizing
     window.addEventListener('resize', this.onWindowResize);
-
-    // Start ambient background music loop
-    soundManager.startAmbientMusic();
   }
 
   private onWindowResize = () => {
@@ -258,60 +270,105 @@ export class GameEngine {
   };
 
   private buildWorld() {
-    // Ambient Light - cool dark cathedral moonlight
-    const ambientLight = new THREE.AmbientLight(0x282045, 0.9);
-    this.scene.add(ambientLight);
+    // 1. Procedural Environment Map for PBR Specular Reflections (avoids black metals)
+    try {
+      const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
+      pmremGenerator.compileEquirectangularShader();
+      const envScene = new THREE.Scene();
+      envScene.background = new THREE.Color(0x141829);
 
-    // Directional Moonlight
-    const moonLight = new THREE.DirectionalLight(0x7568a3, 1.2);
-    moonLight.position.set(20, 35, 20);
-    if (this.graphicSettings.shadows !== 'off') {
-      moonLight.castShadow = true;
-      moonLight.shadow.mapSize.width = 1024;
-      moonLight.shadow.mapSize.height = 1024;
-      moonLight.shadow.camera.near = 0.5;
-      moonLight.shadow.camera.far = 80;
-      moonLight.shadow.camera.left = -25;
-      moonLight.shadow.camera.right = 25;
-      moonLight.shadow.camera.top = 25;
-      moonLight.shadow.camera.bottom = -25;
-      moonLight.shadow.bias = -0.0005;
+      const envLight1 = new THREE.DirectionalLight(0xa0c0ff, 2.0);
+      envLight1.position.set(1, 2, 1);
+      envScene.add(envLight1);
+
+      const envLight2 = new THREE.DirectionalLight(0xffa060, 1.2);
+      envLight2.position.set(-1, -1, -1);
+      envScene.add(envLight2);
+
+      const envTexture = pmremGenerator.fromScene(envScene, 0.04).texture;
+      this.scene.environment = envTexture;
+      pmremGenerator.dispose();
+    } catch (e) {
+      console.warn('Failed to build PMREM environment:', e);
     }
-    this.scene.add(moonLight);
 
-    // Ground Floor: Flagstone arena with grid accents
+    // 2. Hemisphere Ambient Light - balanced moonlight sky & dark earth ground
+    const hemiLight = new THREE.HemisphereLight(0x9cb4d8, 0x241e34, 1.35);
+    this.scene.add(hemiLight);
+
+    // 3. Directional Key Light (Moonlight)
+    const keyLight = new THREE.DirectionalLight(0xffeedb, 1.45);
+    keyLight.position.set(18, 32, 18);
+    if (this.graphicSettings.shadows !== 'off') {
+      keyLight.castShadow = true;
+      keyLight.shadow.mapSize.width = 1024;
+      keyLight.shadow.mapSize.height = 1024;
+      keyLight.shadow.camera.near = 0.5;
+      keyLight.shadow.camera.far = 75;
+      keyLight.shadow.camera.left = -24;
+      keyLight.shadow.camera.right = 24;
+      keyLight.shadow.camera.top = 24;
+      keyLight.shadow.camera.bottom = -24;
+      keyLight.shadow.bias = -0.0005;
+    }
+    this.scene.add(keyLight);
+
+    // 4. Directional Rim / Fill Light (Soft cool contrast)
+    const fillLight = new THREE.DirectionalLight(0x60a5fa, 0.7);
+    fillLight.position.set(-18, 22, -18);
+    this.scene.add(fillLight);
+
+    // 5. Ground Floor: Flagstone arena
     const groundGeo = new THREE.PlaneGeometry(80, 80, 40, 40);
     const groundMat = new THREE.MeshStandardMaterial({
-      color: 0x14121f,
-      roughness: 0.85,
-      metalness: 0.15,
+      color: 0x23253a,
+      roughness: 0.75,
+      metalness: 0.2,
     });
+    this.groundMat = groundMat;
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = this.graphicSettings.shadows !== 'off';
     this.scene.add(ground);
 
-    // Courtyard stone border tiles and runic circle
-    const circleGeo = new THREE.RingGeometry(0.2, 14, 32);
+    // Courtyard runic rings
+    const circleGeo = new THREE.RingGeometry(0.2, 14, 48);
     const circleMat = new THREE.MeshBasicMaterial({
       color: 0x22d3ee,
       transparent: true,
-      opacity: 0.08,
+      opacity: 0.12,
       side: THREE.DoubleSide,
     });
+    this.circleMat = circleMat;
     const ringMesh = new THREE.Mesh(circleGeo, circleMat);
     ringMesh.rotation.x = -Math.PI / 2;
     ringMesh.position.y = 0.02;
     this.scene.add(ringMesh);
 
-    // Perimeter Cathedral Pillars & Gothic Buttresses
+    const outerRingGeo = new THREE.RingGeometry(18.5, 19.2, 48);
+    const outerRingMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.16,
+      side: THREE.DoubleSide,
+    });
+    const outerRing = new THREE.Mesh(outerRingGeo, outerRingMat);
+    outerRing.rotation.x = -Math.PI / 2;
+    outerRing.position.y = 0.02;
+    this.scene.add(outerRing);
+
+    // Clear obstacles array
+    this.arenaObstacles = [];
+
+    // 6. Perimeter Cathedral Pillars & Gothic Buttresses
     const pillarGeo = new THREE.CylinderGeometry(0.7, 0.9, 9, 8);
     const pillarCapGeo = new THREE.BoxGeometry(2.2, 0.6, 2.2);
     const stoneMat = new THREE.MeshStandardMaterial({
-      color: 0x1f1a30,
-      roughness: 0.9,
-      metalness: 0.1,
+      color: 0x2a243e,
+      roughness: 0.85,
+      metalness: 0.15,
     });
+    this.stoneMat = stoneMat;
 
     const pillarPositions = [
       [-16, -16], [0, -18], [16, -16],
@@ -335,23 +392,38 @@ export class GameEngine {
 
       pillarGroup.position.set(px, 0, pz);
       this.scene.add(pillarGroup);
+
+      // Register collision capsule (pillar radius 0.8 + player capsule 0.45)
+      this.arenaObstacles.push({ x: px, z: pz, radius: 1.25 });
     });
 
-    // Boundary Ruined Walls
-    const wallGeo = new THREE.BoxGeometry(40, 5, 1.5);
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x161324, roughness: 0.95 });
+    // 7. Boundary Ruined Walls (North, South, East, West)
+    const wallGeoH = new THREE.BoxGeometry(44, 5, 1.5);
+    const wallGeoV = new THREE.BoxGeometry(1.5, 5, 44);
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x1d192f, roughness: 0.9 });
+    this.wallMat = wallMat;
 
-    const wallNorth = new THREE.Mesh(wallGeo, wallMat);
+    const wallNorth = new THREE.Mesh(wallGeoH, wallMat);
     wallNorth.position.set(0, 2.5, -22);
     wallNorth.castShadow = true;
     this.scene.add(wallNorth);
 
-    const wallSouth = new THREE.Mesh(wallGeo, wallMat);
+    const wallSouth = new THREE.Mesh(wallGeoH, wallMat);
     wallSouth.position.set(0, 2.5, 22);
     wallSouth.castShadow = true;
     this.scene.add(wallSouth);
 
-    // Braziers with dynamic glowing fire
+    const wallWest = new THREE.Mesh(wallGeoV, wallMat);
+    wallWest.position.set(-22, 2.5, 0);
+    wallWest.castShadow = true;
+    this.scene.add(wallWest);
+
+    const wallEast = new THREE.Mesh(wallGeoV, wallMat);
+    wallEast.position.set(22, 2.5, 0);
+    wallEast.castShadow = true;
+    this.scene.add(wallEast);
+
+    // 8. Braziers with dynamic glowing fire
     const brazierPositions = [
       [-10, -10], [10, -10],
       [-10, 10], [10, 10],
@@ -361,7 +433,7 @@ export class GameEngine {
     brazierPositions.forEach(([bx, bz]) => {
       const bGroup = new THREE.Group();
       const standGeo = new THREE.CylinderGeometry(0.35, 0.55, 1.8, 8);
-      const standMat = new THREE.MeshStandardMaterial({ color: 0x2b233a, metalness: 0.6, roughness: 0.4 });
+      const standMat = new THREE.MeshStandardMaterial({ color: 0x362c4a, metalness: 0.6, roughness: 0.4 });
       const stand = new THREE.Mesh(standGeo, standMat);
       stand.position.y = 0.9;
       stand.castShadow = true;
@@ -369,7 +441,7 @@ export class GameEngine {
 
       // Bowl
       const bowlGeo = new THREE.CylinderGeometry(0.85, 0.4, 0.5, 8);
-      const bowlMat = new THREE.MeshStandardMaterial({ color: 0x1f182c, metalness: 0.8, roughness: 0.3 });
+      const bowlMat = new THREE.MeshStandardMaterial({ color: 0x272036, metalness: 0.8, roughness: 0.3 });
       const bowl = new THREE.Mesh(bowlGeo, bowlMat);
       bowl.position.y = 1.9;
       bGroup.add(bowl);
@@ -382,7 +454,7 @@ export class GameEngine {
       bGroup.add(flame);
 
       // Point Light
-      const fireLight = new THREE.PointLight(0xff5722, 2.2, 14, 1.5);
+      const fireLight = new THREE.PointLight(0xff6838, 2.4, 16, 1.6);
       fireLight.position.set(0, 2.3, 0);
       bGroup.add(fireLight);
 
@@ -390,6 +462,9 @@ export class GameEngine {
       this.scene.add(bGroup);
 
       this.braziers.push({ light: fireLight, mesh: bGroup, x: bx, z: bz });
+
+      // Register collision capsule (brazier radius 0.6 + player capsule 0.45)
+      this.arenaObstacles.push({ x: bx, z: bz, radius: 1.05 });
     });
   }
 
@@ -578,8 +653,73 @@ export class GameEngine {
     return mesh;
   }
 
+  // Parallel Asset Loading System: Downloads textures and GLB files concurrently with Cache API
+  public async loadGameAssetsInParallel(
+    onProgress?: (percent: number, statusText: string) => void
+  ): Promise<boolean> {
+    try {
+      const assets = await parallelAssetLoader.loadAll(prog => {
+        onProgress?.(prog.percent, prog.statusText);
+      });
+      this.loadedAssets = assets;
+
+      // 1. Apply textures to world materials
+      if (assets.textures) {
+        if (this.groundMat) {
+          this.groundMat.map = assets.textures.stoneFloorDiffuse;
+          this.groundMat.normalMap = assets.textures.stoneFloorNormal;
+          this.groundMat.normalScale.set(0.6, 0.6);
+          this.groundMat.needsUpdate = true;
+        }
+        if (this.wallMat) {
+          this.wallMat.map = assets.textures.wallStoneDiffuse;
+          this.wallMat.needsUpdate = true;
+        }
+        if (this.stoneMat) {
+          this.stoneMat.map = assets.textures.pillarStoneDiffuse;
+          this.stoneMat.needsUpdate = true;
+        }
+        if (this.circleMat) {
+          this.circleMat.map = assets.textures.runicGlyphs;
+          this.circleMat.needsUpdate = true;
+        }
+      }
+
+      // 2. Mount hero GLB if buffer was downloaded
+      if (assets.heroGlbBuffer) {
+        onProgress?.(98, 'Parsing 3D hero skeleton and animations...');
+        await new Promise<void>(resolve => {
+          this.gltfLoader.parse(
+            assets.heroGlbBuffer!,
+            '',
+            gltf => {
+              this.setupGLTFModel(gltf, 'Ash.glb', 'static_url');
+              resolve();
+            },
+            error => {
+              console.warn('Failed to parse parallel GLB buffer:', error);
+              resolve();
+            }
+          );
+        });
+      } else {
+        // Fallback candidate probe if buffer was null
+        await this.checkAndLoadDefaultGLB(onProgress);
+      }
+
+      // 3. Pre-compile WebGL shaders on GPU to eliminate frame drops on Android
+      onProgress?.(100, 'Pre-compiling GPU shaders for Android...');
+      this.renderer.compile(this.scene, this.camera);
+
+      return true;
+    } catch (err) {
+      console.warn('Parallel asset loading error, falling back:', err);
+      return this.checkAndLoadDefaultGLB(onProgress);
+    }
+  }
+
   // Probe and load default /models/Ash.glb (or fallback character paths)
-  public async checkAndLoadDefaultGLB(): Promise<boolean> {
+  public async checkAndLoadDefaultGLB(onProgress?: (percent: number, statusText: string) => void): Promise<boolean> {
     const candidatePaths = [
       '/models/Ash.glb',
       '/models/ash.glb',
@@ -588,45 +728,45 @@ export class GameEngine {
       '/assets/characters/player.glb',
       '/assets/characters/Player.glb',
       '/assets/characters/character.glb',
-      '/assets/characters/Character.glb',
-      '/assets/characters/hero.glb',
-      '/assets/characters/Hero.glb',
-      '/assets/characters/player.gltf',
-      '/assets/characters/character.gltf',
-      '/player.glb',
-      '/character.glb',
     ];
 
     for (const path of candidatePaths) {
       try {
-        let res = await fetch(path, { method: 'HEAD' });
-        if (!res.ok && res.status !== 404) {
-          // If server rejects HEAD, retry with GET
-          res = await fetch(path, { method: 'GET', headers: { Range: 'bytes=0-32' } });
-        }
-        if (res.ok) {
-          const loaded = await this.loadGLBFromURL(path, path.split('/').pop() || 'Ash.glb');
-          if (loaded) return true;
-        }
+        const loaded = await this.loadGLBFromURL(path, path.split('/').pop() || 'Ash.glb', onProgress);
+        if (loaded) return true;
       } catch (e) {
-        // file not yet placed, fallback smoothly
+        // Continue searching candidates
       }
     }
     return false;
   }
 
   // Load GLB from URL (e.g. static assets)
-  public async loadGLBFromURL(url: string, fileName = 'player.glb'): Promise<boolean> {
+  public async loadGLBFromURL(
+    url: string,
+    fileName = 'player.glb',
+    onProgress?: (percent: number, statusText: string) => void
+  ): Promise<boolean> {
     return new Promise(resolve => {
       this.gltfLoader.load(
         url,
         gltf => {
           this.setupGLTFModel(gltf, fileName, 'static_url');
+          onProgress?.(100, 'Hero Model Loaded');
           resolve(true);
         },
-        undefined,
+        xhr => {
+          if (xhr.lengthComputable && xhr.total > 0) {
+            const pct = Math.round((xhr.loaded / xhr.total) * 100);
+            const mbLoaded = (xhr.loaded / (1024 * 1024)).toFixed(1);
+            const mbTotal = (xhr.total / (1024 * 1024)).toFixed(1);
+            onProgress?.(pct, `Loading Hero 3D Assets (${mbLoaded} MB / ${mbTotal} MB)...`);
+          } else {
+            onProgress?.(50, 'Downloading Hero 3D Assets...');
+          }
+        },
         error => {
-          console.warn('Failed to load GLB from url:', url, error);
+          console.warn('Failed to load GLB from candidate url:', url, error);
           resolve(false);
         }
       );
@@ -705,8 +845,25 @@ export class GameEngine {
         }
         child.castShadow = this.modelConfig.castShadows;
         child.receiveShadow = true;
-        if (child.material) {
-          child.material.side = THREE.DoubleSide;
+        child.frustumCulled = true;
+
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        for (const mat of mats) {
+          if (!mat) continue;
+          mat.side = THREE.DoubleSide;
+          if (mat.map) {
+            mat.map.colorSpace = THREE.SRGBColorSpace;
+            mat.map.needsUpdate = true;
+          }
+          if (mat.emissiveMap) {
+            mat.emissiveMap.colorSpace = THREE.SRGBColorSpace;
+            mat.emissiveMap.needsUpdate = true;
+          }
+          if (mat.roughness !== undefined && mat.roughness < 0.2) {
+            mat.roughness = 0.25;
+          }
+          mat.envMapIntensity = 1.25;
+          mat.needsUpdate = true;
         }
       }
     });
@@ -1823,6 +1980,10 @@ export class GameEngine {
     this.playerVelocity.set(0, 0, 0);
     this.playerVy = 0;
     this.isGrounded = true;
+    this.cameraYaw = 0;
+    this.cameraPitch = 0.28;
+    this.smoothedCamPos.set(0, 4, 8);
+    this.smoothedCamTarget.set(0, 1.5, 0);
 
     this.playAshAnimation('Idle', 0.15, true);
     this.spawnChapterEnemies(this.currentQuest.chapter);
@@ -2011,28 +2172,40 @@ export class GameEngine {
       this.playerVelocity.x *= 0.3;
       this.playerVelocity.z *= 0.3;
     } else if (this.isCrawlInputActive && this.isGrounded) {
-      // Slow backward movement
+      // Slow backward movement away from facing direction
       const crawlSpeed = 2.0;
-      this.playerVelocity.x = -Math.sin(this.playerRotationY) * crawlSpeed;
-      this.playerVelocity.z = -Math.cos(this.playerRotationY) * crawlSpeed;
+      this.playerVelocity.x = Math.sin(this.playerRotationY) * crawlSpeed;
+      this.playerVelocity.z = Math.cos(this.playerRotationY) * crawlSpeed;
     } else {
       if (this.inputVector.magnitude > 0.05) {
-        const stickAngle = Math.atan2(this.inputVector.x, this.inputVector.y);
-        const targetRotation = stickAngle + this.cameraYaw;
+        const inX = this.inputVector.x;
+        const inY = this.inputVector.y;
+        const camYaw = this.cameraYaw;
+
+        // Camera-relative movement vector
+        // In Three.js coordinate system: camera looks toward -Z at yaw 0
+        // Pushing UP (inY > 0) -> move forward (-Z)
+        // Pushing DOWN (inY < 0) -> move backward (+Z)
+        // Pushing RIGHT (inX > 0) -> move right (+X)
+        // Pushing LEFT (inX < 0) -> move left (-X)
+        const moveDirX = inX * Math.cos(camYaw) - inY * Math.sin(camYaw);
+        const moveDirZ = -inX * Math.sin(camYaw) - inY * Math.cos(camYaw);
+
+        const targetRotation = Math.atan2(moveDirX, -moveDirZ);
 
         let diff = targetRotation - this.playerRotationY;
         while (diff < -Math.PI) diff += Math.PI * 2;
         while (diff > Math.PI) diff -= Math.PI * 2;
-        this.playerRotationY += diff * 12.0 * clampedDelta;
+        this.playerRotationY += diff * 14.0 * clampedDelta;
 
         const effectiveMag = Math.min(1.0, this.inputVector.magnitude);
         const speed = effectiveMag * moveSpeed;
 
-        this.playerVelocity.x = Math.sin(this.playerRotationY) * speed;
-        this.playerVelocity.z = Math.cos(this.playerRotationY) * speed;
+        this.playerVelocity.x = moveDirX * speed;
+        this.playerVelocity.z = moveDirZ * speed;
       } else {
-        this.playerVelocity.x *= 0.75;
-        this.playerVelocity.z *= 0.75;
+        this.playerVelocity.x *= 0.72;
+        this.playerVelocity.z *= 0.72;
       }
     }
 
@@ -2059,13 +2232,62 @@ export class GameEngine {
           }
         }
       }
+    } else {
+      // Keep grounded character anchored to floor
+      this.playerPosition.y = 0;
+      this.playerVy = 0;
     }
 
-    // Apply Velocity to Position with Arena Boundary limits
+    // Apply horizontal velocity
     this.playerPosition.x += this.playerVelocity.x * clampedDelta;
     this.playerPosition.z += this.playerVelocity.z * clampedDelta;
-    this.playerPosition.x = THREE.MathUtils.clamp(this.playerPosition.x, -21, 21);
-    this.playerPosition.z = THREE.MathUtils.clamp(this.playerPosition.z, -21, 21);
+
+    // Obstacle capsule collision (Pillars & Braziers) with tangent wall-sliding
+    for (let i = 0; i < this.arenaObstacles.length; i++) {
+      const obs = this.arenaObstacles[i];
+      const dx = this.playerPosition.x - obs.x;
+      const dz = this.playerPosition.z - obs.z;
+      const distSq = dx * dx + dz * dz;
+      const minD = obs.radius;
+      if (distSq < minD * minD && distSq > 0.0001) {
+        const dist = Math.sqrt(distSq);
+        const nx = dx / dist;
+        const nz = dz / dist;
+        // Push capsule out to surface
+        this.playerPosition.x = obs.x + nx * minD;
+        this.playerPosition.z = obs.z + nz * minD;
+        // Remove normal component of velocity for smooth sliding
+        const dot = this.playerVelocity.x * nx + this.playerVelocity.z * nz;
+        if (dot < 0) {
+          this.playerVelocity.x -= dot * nx;
+          this.playerVelocity.z -= dot * nz;
+        }
+      }
+    }
+
+    // Arena boundary limits (Inside perimeter stone walls)
+    const arenaLimit = 20.2;
+    if (this.playerPosition.x < -arenaLimit) {
+      this.playerPosition.x = -arenaLimit;
+      if (this.playerVelocity.x < 0) this.playerVelocity.x = 0;
+    } else if (this.playerPosition.x > arenaLimit) {
+      this.playerPosition.x = arenaLimit;
+      if (this.playerVelocity.x > 0) this.playerVelocity.x = 0;
+    }
+    if (this.playerPosition.z < -arenaLimit) {
+      this.playerPosition.z = -arenaLimit;
+      if (this.playerVelocity.z < 0) this.playerVelocity.z = 0;
+    } else if (this.playerPosition.z > arenaLimit) {
+      this.playerPosition.z = arenaLimit;
+      if (this.playerVelocity.z > 0) this.playerVelocity.z = 0;
+    }
+
+    // Failsafe: character can never fall into void
+    if (this.playerPosition.y < 0) {
+      this.playerPosition.y = 0;
+      this.playerVy = 0;
+      this.isGrounded = true;
+    }
 
     // Update Player Model Transform
     this.playerGroup.position.copy(this.playerPosition);
@@ -2277,12 +2499,25 @@ export class GameEngine {
       this.cameraYaw = Math.atan2(-dir.x, -dir.z);
     }
 
-    const camX = this.playerPosition.x + Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDistance;
-    const camY = this.playerPosition.y + Math.sin(this.cameraPitch) * this.cameraDistance + 1.8;
-    const camZ = this.playerPosition.z + Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDistance;
+    // Clamp pitch to safe bounds so camera never clips into the floor
+    this.cameraPitch = THREE.MathUtils.clamp(this.cameraPitch, -0.10, 0.82);
 
-    this.camera.position.set(camX, camY, camZ);
-    this.camera.lookAt(this.playerPosition.x, this.playerPosition.y + 1.5, this.playerPosition.z);
+    const targetCamX = this.playerPosition.x + Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDistance;
+    const targetCamY = Math.max(0.75, this.playerPosition.y + Math.sin(this.cameraPitch) * this.cameraDistance + 1.8);
+    const targetCamZ = this.playerPosition.z + Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDistance;
+
+    // Smooth exponential lerp (0.16) for cinematic smoothness without lag
+    this.smoothedCamPos.x += (targetCamX - this.smoothedCamPos.x) * 0.16;
+    this.smoothedCamPos.y += (targetCamY - this.smoothedCamPos.y) * 0.16;
+    this.smoothedCamPos.z += (targetCamZ - this.smoothedCamPos.z) * 0.16;
+
+    const targetLookY = this.playerPosition.y + 1.45;
+    this.smoothedCamTarget.x += (this.playerPosition.x - this.smoothedCamTarget.x) * 0.16;
+    this.smoothedCamTarget.y += (targetLookY - this.smoothedCamTarget.y) * 0.16;
+    this.smoothedCamTarget.z += (this.playerPosition.z - this.smoothedCamTarget.z) * 0.16;
+
+    this.camera.position.copy(this.smoothedCamPos);
+    this.camera.lookAt(this.smoothedCamTarget);
 
     // 6. Flickering Brazier Fire
     this.braziers.forEach((b, i) => {
@@ -2340,6 +2575,7 @@ export class GameEngine {
 
   public destroy() {
     this.stop();
+    parallelAssetLoader.abort();
     soundManager.stopAmbientMusic();
     window.removeEventListener('resize', this.onWindowResize);
     if (this.renderer && this.renderer.domElement && this.container) {

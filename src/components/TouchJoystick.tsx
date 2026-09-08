@@ -13,66 +13,87 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = ({
   onVectorChange,
   className = '',
 }) => {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const baseRef = useRef<HTMLDivElement>(null);
   const activePointerId = useRef<number | null>(null);
 
-  // Joystick Base Position
-  const [basePos, setBasePos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  // Knob relative offset from base
+  // Knob relative offset from center of base in pixels (starts exactly at 0, 0)
   const [knobPos, setKnobPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isActive, setIsActive] = useState(false);
   const [isSprinting, setIsSprinting] = useState(false);
 
-  // Set default fixed base position inside the container
-  const updateDefaultBase = useCallback(() => {
-    if (containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
-      const defaultX = config.leftHanded ? rect.width - config.radius - 30 : config.radius + 30;
-      const defaultY = rect.height - config.radius - 35;
-      setBasePos({ x: defaultX, y: defaultY });
-    }
-  }, [config.leftHanded, config.radius]);
+  // Smoothed vector refs to eliminate jitter without latency
+  const currentVectorRef = useRef({ x: 0, y: 0, magnitude: 0 });
+  const animFrameRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    updateDefaultBase();
-    window.addEventListener('resize', updateDefaultBase);
-    return () => window.removeEventListener('resize', updateDefaultBase);
-  }, [updateDefaultBase]);
+  const maxRadius = config.radius || 54;
+  const deadzoneRadius = Math.max(4, (config.deadzone || 0.12) * maxRadius);
 
-  // Compute processed input vector from raw dx, dy
-  const processVector = useCallback(
-    (dx: number, dy: number) => {
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      const maxRadius = config.radius;
-      const deadzonePixels = config.deadzone * maxRadius;
+  // Reset input immediately to exact center (0, 0)
+  const resetToCenter = useCallback(() => {
+    activePointerId.current = null;
+    setIsActive(false);
+    setIsSprinting(false);
+    setKnobPos({ x: 0, y: 0 });
+    currentVectorRef.current = { x: 0, y: 0, magnitude: 0 };
+    onVectorChange({ x: 0, y: 0, magnitude: 0 });
+  }, [onVectorChange]);
 
-      if (distance < deadzonePixels) {
+  // Compute vector from screen touch coordinates relative to base center
+  const processTouch = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!baseRef.current) return;
+      const rect = baseRef.current.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+
+      const dx = clientX - centerX;
+      const dy = clientY - centerY;
+      const distance = Math.hypot(dx, dy);
+
+      if (distance < deadzoneRadius) {
+        // Inside circular dead zone: no accidental drift
         setIsSprinting(false);
+        setKnobPos({ x: 0, y: 0 });
+        currentVectorRef.current = { x: 0, y: 0, magnitude: 0 };
         onVectorChange({ x: 0, y: 0, magnitude: 0 });
-        return { knobX: dx, knobY: dy };
+        return;
       }
 
-      // Re-map normalized magnitude smoothly from 0.0 at deadzone edge to 1.0 at max radius
-      const normalizedRaw = Math.min(1.0, (distance - deadzonePixels) / (maxRadius - deadzonePixels));
+      // Smooth normalized magnitude [0.0, 1.0] outside dead zone
+      const rawNormalized = Math.min(1.0, (distance - deadzoneRadius) / (maxRadius - deadzoneRadius));
 
-      // Apply response curve
-      let curvedMag = normalizedRaw;
+      // Optional response curves
+      let curveMag = rawNormalized;
       if (config.responseCurve === 'smooth') {
-        curvedMag = Math.pow(normalizedRaw, 1.5);
+        curveMag = Math.pow(rawNormalized, 1.3);
       } else if (config.responseCurve === 'aggressive') {
-        curvedMag = Math.pow(normalizedRaw, 0.75);
+        curveMag = Math.pow(rawNormalized, 0.8);
       }
 
-      // Apply sensitivity multiplier
-      const finalMagnitude = Math.min(1.0, curvedMag * config.sensitivity);
+      const finalMagnitude = Math.min(1.0, curveMag * (config.sensitivity || 1.0));
 
-      // Unit direction
-      const angle = Math.atan2(dx, -dy); // 0 is forward/up
-      const outX = Math.sin(angle) * finalMagnitude;
-      const outY = Math.cos(angle) * finalMagnitude;
+      // Unit vector: screen Y is downward, so game Y (forward) is -dy
+      const dirX = dx / (distance || 1);
+      const dirY = dy / (distance || 1);
 
-      // Check sprint threshold
-      const inSprint = finalMagnitude >= config.sprintThreshold;
+      // Game coordinates: +X = Right, -X = Left, +Y = Forward (Up), -Y = Backward (Down)
+      const gameX = dirX * finalMagnitude;
+      const gameY = -dirY * finalMagnitude;
+
+      // Ensure diagonal magnitude is exactly normalized (never exceeds 1.0)
+      const clampedMag = Math.min(1.0, Math.hypot(gameX, gameY));
+      const normalizedGameX = clampedMag > 0 ? (gameX / clampedMag) * finalMagnitude : 0;
+      const normalizedGameY = clampedMag > 0 ? (gameY / clampedMag) * finalMagnitude : 0;
+
+      // Visual knob clamping
+      const visualDistance = Math.min(distance, maxRadius);
+      const clampedKnobX = dirX * visualDistance;
+      const clampedKnobY = dirY * visualDistance;
+
+      setKnobPos({ x: clampedKnobX, y: clampedKnobY });
+
+      // Sprint state threshold check
+      const inSprint = finalMagnitude >= (config.sprintThreshold || 0.88);
       if (inSprint !== isSprinting) {
         setIsSprinting(inSprint);
         if (inSprint && config.haptics) {
@@ -80,174 +101,139 @@ export const TouchJoystick: React.FC<TouchJoystickProps> = ({
         }
       }
 
-      onVectorChange({ x: outX, y: outY, magnitude: finalMagnitude });
+      currentVectorRef.current = {
+        x: normalizedGameX,
+        y: normalizedGameY,
+        magnitude: finalMagnitude,
+      };
 
-      // Clamp knob visual position within max radius
-      const clampedDist = Math.min(distance, maxRadius);
-      const knobX = (dx / (distance || 1)) * clampedDist;
-      const knobY = (dy / (distance || 1)) * clampedDist;
-
-      return { knobX, knobY };
+      onVectorChange({
+        x: normalizedGameX,
+        y: normalizedGameY,
+        magnitude: finalMagnitude,
+      });
     },
-    [config, onVectorChange, isSprinting]
+    [baseRef, config, deadzoneRadius, maxRadius, isSprinting, onVectorChange]
   );
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Multi-touch isolation: only track one pointer for this joystick
     if (activePointerId.current !== null) return;
     activePointerId.current = e.pointerId;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
 
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-
-    const touchX = e.clientX - rect.left;
-    const touchY = e.clientY - rect.top;
-
-    let currentBase = basePos;
-    if (config.dynamicAnchor) {
-      currentBase = { x: touchX, y: touchY };
-      setBasePos(currentBase);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch (err) {
+      // safe fallback
     }
 
     setIsActive(true);
-    if (config.haptics) triggerHaptic(15);
+    if (config.haptics) triggerHaptic(12);
 
-    const dx = touchX - currentBase.x;
-    const dy = touchY - currentBase.y;
-    const { knobX, knobY } = processVector(dx, dy);
-    setKnobPos({ x: knobX, y: knobY });
+    processTouch(e.clientX, e.clientY);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (activePointerId.current !== e.pointerId) return;
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-
-    const touchX = e.clientX - rect.left;
-    const touchY = e.clientY - rect.top;
-
-    const dx = touchX - basePos.x;
-    const dy = touchY - basePos.y;
-
-    const { knobX, knobY } = processVector(dx, dy);
-    setKnobPos({ x: knobX, y: knobY });
+    processTouch(e.clientX, e.clientY);
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (activePointerId.current !== e.pointerId) return;
-    activePointerId.current = null;
-    setIsActive(false);
-    setIsSprinting(false);
-    setKnobPos({ x: 0, y: 0 });
-    onVectorChange({ x: 0, y: 0, magnitude: 0 });
-
-    if (config.dynamicAnchor) {
-      updateDefaultBase();
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch (err) {
+      // safe fallback
     }
+    resetToCenter();
   };
 
-  const radius = config.radius;
-  const deadzoneRadius = config.deadzone * radius;
-  const sprintRadius = config.sprintThreshold * radius;
+  useEffect(() => {
+    return () => {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    };
+  }, []);
+
+  const baseDiameter = maxRadius * 2;
+  const knobDiameter = maxRadius * 0.85;
 
   return (
     <div
-      ref={containerRef}
+      className={`relative select-none pointer-events-auto touch-none flex items-center justify-center p-3 ${className}`}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
-      className={`relative select-none pointer-events-auto touch-none ${className}`}
-      style={{
-        opacity: config.opacity,
-      }}
+      style={{ opacity: config.opacity || 0.85 }}
     >
-      {/* Joystick Base Outer Container */}
+      {/* Joystick Base Outer Enclosure */}
       <div
-        className="absolute rounded-full pointer-events-none transition-transform duration-75"
+        ref={baseRef}
+        className={`relative rounded-full border-2 transition-colors duration-150 flex items-center justify-center shadow-2xl ${
+          isSprinting
+            ? 'border-amber-400 bg-ashen-950/80 shadow-[0_0_25px_rgba(245,158,11,0.4)]'
+            : isActive
+            ? 'border-cyan-400/80 bg-ashen-950/75 shadow-[0_0_20px_rgba(34,211,238,0.35)]'
+            : 'border-ashen-700/60 bg-ashen-950/60'
+        }`}
         style={{
-          left: `${basePos.x - radius}px`,
-          top: `${basePos.y - radius}px`,
-          width: `${radius * 2}px`,
-          height: `${radius * 2}px`,
+          width: `${baseDiameter}px`,
+          height: `${baseDiameter}px`,
         }}
       >
-        {/* Outer Ring with Dark Fantasy Glass Backing */}
+        {/* Cardinal Direction Notches */}
+        <div className="absolute top-1.5 w-1 h-2 bg-ashen-600/50 rounded-full" />
+        <div className="absolute bottom-1.5 w-1 h-2 bg-ashen-600/50 rounded-full" />
+        <div className="absolute left-1.5 h-1 w-2 bg-ashen-600/50 rounded-full" />
+        <div className="absolute right-1.5 h-1 w-2 bg-ashen-600/50 rounded-full" />
+
+        {/* Deadzone Ring Visual Indicator */}
         <div
-          className={`w-full h-full rounded-full border-2 transition-all duration-200 flex items-center justify-center relative ${
-            isSprinting
-              ? 'border-ember-500 bg-ashen-900/60 shadow-[0_0_20px_rgba(255,87,34,0.4)]'
-              : isActive
-              ? 'border-cyanGlow-400 bg-ashen-900/40 shadow-[0_0_15px_rgba(34,211,238,0.3)]'
-              : 'border-ashen-600/60 bg-ashen-950/30'
+          className="absolute rounded-full border border-dashed border-ashen-700/40 pointer-events-none"
+          style={{
+            width: `${deadzoneRadius * 2}px`,
+            height: `${deadzoneRadius * 2}px`,
+          }}
+        />
+
+        {/* Sprint Ring Visual Indicator */}
+        <div
+          className={`absolute rounded-full border pointer-events-none transition-colors duration-150 ${
+            isSprinting ? 'border-amber-500/60' : 'border-cyan-500/20'
           }`}
+          style={{
+            width: `${(config.sprintThreshold || 0.88) * baseDiameter}px`,
+            height: `${(config.sprintThreshold || 0.88) * baseDiameter}px`,
+          }}
+        />
+
+        {/* Dynamic Glowing Thumb Knob */}
+        <div
+          className={`absolute rounded-full border-2 flex items-center justify-center pointer-events-none transition-transform duration-75 shadow-lg ${
+            isSprinting
+              ? 'border-amber-300 bg-gradient-to-br from-amber-500 to-amber-700 shadow-[0_0_15px_rgba(245,158,11,0.6)] scale-105'
+              : isActive
+              ? 'border-cyan-300 bg-gradient-to-br from-cyan-500 to-cyan-700 shadow-[0_0_15px_rgba(34,211,238,0.6)]'
+              : 'border-ashen-500 bg-gradient-to-br from-ashen-700 to-ashen-800'
+          }`}
+          style={{
+            width: `${knobDiameter}px`,
+            height: `${knobDiameter}px`,
+            transform: `translate(${knobPos.x}px, ${knobPos.y}px)`,
+          }}
         >
-          {/* 4 Cardinal Runic Ticks */}
-          <div className="absolute top-1 w-1 h-2 bg-ashen-400/70 rounded-full" />
-          <div className="absolute bottom-1 w-1 h-2 bg-ashen-400/70 rounded-full" />
-          <div className="absolute left-1 w-2 h-1 bg-ashen-400/70 rounded-full" />
-          <div className="absolute right-1 w-2 h-1 bg-ashen-400/70 rounded-full" />
-
-          {/* Deadzone Boundary Indicator Circle */}
+          {/* Thumb Inner Core Pip */}
           <div
-            className="absolute rounded-full border border-dashed border-ashen-500/30 pointer-events-none"
-            style={{
-              width: `${deadzoneRadius * 2}px`,
-              height: `${deadzoneRadius * 2}px`,
-            }}
-          />
-
-          {/* Sprint Threshold Outer Circle */}
-          <div
-            className={`absolute rounded-full border border-dotted transition-colors duration-150 pointer-events-none ${
-              isSprinting ? 'border-ember-400/80 scale-105' : 'border-ashen-600/30'
+            className={`w-3 h-3 rounded-full ${
+              isSprinting
+                ? 'bg-amber-100 shadow-[0_0_6px_#fef08a]'
+                : isActive
+                ? 'bg-cyan-100 shadow-[0_0_6px_#cffafe]'
+                : 'bg-ashen-400'
             }`}
-            style={{
-              width: `${sprintRadius * 2}px`,
-              height: `${sprintRadius * 2}px`,
-            }}
           />
-
-          {/* Sprint Mode Label */}
-          {isSprinting && (
-            <span className="absolute -top-6 text-[10px] font-bold tracking-widest uppercase text-ember-400 animate-pulse bg-ashen-950/80 px-2 py-0.5 rounded border border-ember-500/40">
-              SPRINT
-            </span>
-          )}
-
-          {/* Interactive Thumb Knob */}
-          <div
-            className={`absolute rounded-full shadow-lg flex items-center justify-center transition-transform ${
-              isActive ? 'scale-110' : 'scale-100'
-            }`}
-            style={{
-              width: `${radius * 0.72}px`,
-              height: `${radius * 0.72}px`,
-              transform: `translate(${knobPos.x}px, ${knobPos.y}px)`,
-              background: isSprinting
-                ? 'radial-gradient(circle, #ff7043 0%, #b71c1c 90%)'
-                : isActive
-                ? 'radial-gradient(circle, #22d3ee 0%, #1e1b4b 90%)'
-                : 'radial-gradient(circle, #4e4572 0%, #0d0b14 90%)',
-              border: isSprinting
-                ? '2px solid #ffcc80'
-                : isActive
-                ? '2px solid #a5f3fc'
-                : '1.5px solid #7568a3',
-              boxShadow: isSprinting
-                ? '0 0 16px rgba(255,112,67,0.7)'
-                : isActive
-                ? '0 0 14px rgba(34,211,238,0.6)'
-                : '0 4px 8px rgba(0,0,0,0.6)',
-            }}
-          >
-            {/* Inner Runic Emblem */}
-            <div
-              className={`w-2.5 h-2.5 rounded-full transition-colors ${
-                isSprinting ? 'bg-white' : isActive ? 'bg-cyan-200' : 'bg-ashen-400'
-              }`}
-            />
-          </div>
         </div>
       </div>
     </div>

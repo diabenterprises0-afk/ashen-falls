@@ -4,11 +4,13 @@ import { TouchJoystick } from './components/TouchJoystick';
 import { CameraTouchZone } from './components/CameraTouchZone';
 import { TouchCombatControls } from './components/TouchCombatControls';
 import { GameHUD } from './components/GameHUD';
-import { JoystickCalibrationModal } from './components/JoystickCalibrationModal';
-import { AndroidDeploymentModal } from './components/AndroidDeploymentModal';
-import { CharacterUploadModal } from './components/CharacterUploadModal';
+import { LoadingScreen } from './components/LoadingScreen';
+import { MainMenu } from './components/MainMenu';
+import { PauseMenu } from './components/PauseMenu';
+import { PlayerSettingsModal } from './components/PlayerSettingsModal';
 import { GameOverModal } from './components/GameOverModal';
 import { VictoryModal } from './components/VictoryModal';
+import { AndroidDeploymentModal } from './components/AndroidDeploymentModal';
 import {
   PlayerStats,
   ChapterQuest,
@@ -19,16 +21,25 @@ import {
   ModelCalibrationConfig,
   CustomModelInfo,
 } from './types/game';
-import { loadGameSettings, saveGameSettings, triggerHaptic } from './utils/storage';
+import { loadGameSettings, saveGameSettings } from './utils/storage';
 import { soundManager } from './utils/audio';
+
+type AppFlowState = 'LOADING' | 'MENU' | 'PLAYING' | 'PAUSED';
 
 export const App: React.FC = () => {
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<GameEngine | null>(null);
 
+  // App Navigation Flow
+  const [appFlow, setAppFlow] = useState<AppFlowState>('LOADING');
+  const [loadingProgress, setLoadingProgress] = useState(15);
+  const [loadingStatus, setLoadingStatus] = useState('Initializing Ashen Realm engine...');
+
   // Settings
   const [settings, setSettings] = useState(() => loadGameSettings());
   const [isMuted, setIsMuted] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showAndroidModal, setShowAndroidModal] = useState(false);
 
   // Live Game State
   const [stats, setStats] = useState<PlayerStats>({
@@ -62,31 +73,18 @@ export const App: React.FC = () => {
 
   const [boss, setBoss] = useState<EnemyEntity | null>(null);
   const [floatingTexts, setFloatingTexts] = useState<FloatingText[]>([]);
-  const [fps, setFps] = useState(60);
   const [isLockedOn, setIsLockedOn] = useState(false);
 
-  // Custom Character Model Info
-  const [modelInfo, setModelInfo] = useState<CustomModelInfo>({
-    isLoaded: false,
-    name: 'Procedural Ashen Knight',
-    source: 'procedural_default',
-    hasAnimations: false,
-    animationNames: [],
-    meshCount: 14,
-    vertexCount: 960,
-    config: settings.modelConfig,
-  });
-
   // Modals
-  const [showCalibrationModal, setShowCalibrationModal] = useState(false);
-  const [showAndroidModal, setShowAndroidModal] = useState(false);
-  const [showCharacterModal, setShowCharacterModal] = useState(false);
   const [isGameOver, setIsGameOver] = useState(false);
   const [isVictory, setIsVictory] = useState(false);
 
   // Initialize Game Engine
   useEffect(() => {
     if (!canvasContainerRef.current) return;
+
+    setLoadingProgress(25);
+    setLoadingStatus('Building gothic cathedral courtyard and lighting...');
 
     const engine = new GameEngine(
       canvasContainerRef.current,
@@ -102,8 +100,8 @@ export const App: React.FC = () => {
         onBossStateChange: b => setBoss(b),
         onGameOver: () => setIsGameOver(true),
         onVictory: () => setIsVictory(true),
-        onFpsUpdate: currentFps => setFps(currentFps),
-        onModelInfoUpdate: info => setModelInfo(info),
+        onFpsUpdate: () => {},
+        onModelInfoUpdate: () => {},
       },
       settings.joystick,
       settings.graphics,
@@ -113,81 +111,135 @@ export const App: React.FC = () => {
     engineRef.current = engine;
     engine.start();
 
+    // Parallel Asset Loading System: Concurrent GLB & Texture streaming with CacheStorage
+    setLoadingProgress(15);
+    setLoadingStatus('Downloading textures and 3D assets in parallel...');
+
+    engine
+      .loadGameAssetsInParallel((pct, status) => {
+        setLoadingProgress(pct);
+        setLoadingStatus(status);
+      })
+      .then(() => {
+        setLoadingProgress(100);
+        setLoadingStatus('Ready to embark');
+        setTimeout(() => {
+          setAppFlow('MENU');
+        }, 350);
+      })
+      .catch(err => {
+        console.warn('Parallel loading encountered warning:', err);
+        setLoadingProgress(100);
+        setTimeout(() => {
+          setAppFlow('MENU');
+        }, 300);
+      });
+
     return () => {
       engine.destroy();
       engineRef.current = null;
     };
   }, []);
 
-  // Update engine configurations when settings change
-  const handleSaveJoystickConfig = (newJoystickConfig: JoystickConfig) => {
-    const newSettings = { ...settings, joystick: newJoystickConfig };
-    setSettings(newSettings);
-    saveGameSettings(newSettings);
-    if (engineRef.current) {
-      engineRef.current.joystickConfig = newJoystickConfig;
-    }
-  };
+  // Audio Toggle
+  const handleToggleMute = useCallback(() => {
+    const muted = soundManager.toggleMute();
+    setIsMuted(muted);
+  }, []);
 
-  const handleSaveGraphicsConfig = (newGraphics: GraphicSettings) => {
-    const newSettings = { ...settings, graphics: newGraphics };
-    setSettings(newSettings);
-    saveGameSettings(newSettings);
-    if (engineRef.current) {
-      engineRef.current.graphicSettings = newGraphics;
-    }
-  };
+  // Save Settings Handlers
+  const handleSaveJoystickConfig = useCallback(
+    (newJoystickConfig: JoystickConfig) => {
+      const newSettings = { ...settings, joystick: newJoystickConfig };
+      setSettings(newSettings);
+      saveGameSettings(newSettings);
+      if (engineRef.current) {
+        engineRef.current.joystickConfig = newJoystickConfig;
+      }
+    },
+    [settings]
+  );
 
-  const handleSaveModelCalibration = (newConfig: ModelCalibrationConfig) => {
-    const newSettings = { ...settings, modelConfig: newConfig };
-    setSettings(newSettings);
-    saveGameSettings(newSettings);
-    if (engineRef.current) {
-      engineRef.current.applyModelCalibration(newConfig);
-    }
-  };
-
-  const handleUploadCharacterFile = async (file: File): Promise<boolean> => {
-    if (!engineRef.current) return false;
-    try {
-      const buffer = await file.arrayBuffer();
-      const success = await engineRef.current.loadGLBFromArrayBuffer(buffer, file.name);
-      return success;
-    } catch (e) {
-      console.error('Failed to load uploaded character:', e);
-      return false;
-    }
-  };
-
-  const handleReloadFromFolder = async (): Promise<boolean> => {
-    if (!engineRef.current) return false;
-    return await engineRef.current.checkAndLoadDefaultGLB();
-  };
-
-  const handleResetCharacterToDefault = () => {
-    if (engineRef.current) {
-      engineRef.current.resetToDefaultKnight();
-    }
-  };
+  const handleSaveGraphicsConfig = useCallback(
+    (newGraphics: GraphicSettings) => {
+      const newSettings = { ...settings, graphics: newGraphics };
+      setSettings(newSettings);
+      saveGameSettings(newSettings);
+      if (engineRef.current) {
+        engineRef.current.graphicSettings = newGraphics;
+      }
+    },
+    [settings]
+  );
 
   // Joystick Input Handler
   const handleJoystickVector = useCallback(
     (vector: { x: number; y: number; magnitude: number }) => {
+      if (appFlow !== 'PLAYING') return;
       if (engineRef.current) {
         engineRef.current.inputVector = vector;
       }
     },
-    []
+    [appFlow]
   );
 
   // Camera Orbit Handler
-  const handleCameraRotate = useCallback((deltaYaw: number, deltaPitch: number) => {
+  const handleCameraRotate = useCallback(
+    (deltaYaw: number, deltaPitch: number) => {
+      if (appFlow !== 'PLAYING') return;
+      if (engineRef.current) {
+        engineRef.current.cameraYaw += deltaYaw;
+        engineRef.current.cameraPitch = Math.max(
+          -0.10,
+          Math.min(0.82, engineRef.current.cameraPitch + deltaPitch)
+        );
+      }
+    },
+    [appFlow]
+  );
+
+  // Game Flow Controls
+  const handleStartGame = useCallback(() => {
+    setAppFlow('PLAYING');
+    if (!isMuted) {
+      soundManager.startAmbientMusic();
+    }
+  }, [isMuted]);
+
+  const handleResumeGame = useCallback(() => {
+    setAppFlow('PLAYING');
+  }, []);
+
+  const handleRestartChapter = useCallback(() => {
+    setAppFlow('PLAYING');
+    setIsGameOver(false);
+    setIsVictory(false);
     if (engineRef.current) {
-      engineRef.current.cameraYaw += deltaYaw;
-      engineRef.current.cameraPitch = Math.max(
-        -0.45,
-        Math.min(1.1, engineRef.current.cameraPitch + deltaPitch)
-      );
+      engineRef.current.respawn();
+    }
+  }, []);
+
+  const handleQuitToMainMenu = useCallback(() => {
+    setAppFlow('MENU');
+    setIsGameOver(false);
+    setIsVictory(false);
+    if (engineRef.current) {
+      engineRef.current.respawn();
+    }
+  }, []);
+
+  const handleRespawn = useCallback(() => {
+    setIsGameOver(false);
+    if (engineRef.current) {
+      engineRef.current.respawn();
+    }
+  }, []);
+
+  const handlePlayAgain = useCallback(() => {
+    setIsVictory(false);
+    if (engineRef.current) {
+      engineRef.current.stats.score = 0;
+      engineRef.current.respawn();
     }
   }, []);
 
@@ -196,6 +248,16 @@ export const App: React.FC = () => {
     const keysPressed: Record<string, boolean> = {};
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Escape') {
+        if (appFlow === 'PLAYING') {
+          setAppFlow('PAUSED');
+        } else if (appFlow === 'PAUSED') {
+          setAppFlow('PLAYING');
+        }
+        return;
+      }
+
+      if (appFlow !== 'PLAYING') return;
       keysPressed[e.code] = true;
       if (!engineRef.current) return;
 
@@ -235,7 +297,7 @@ export const App: React.FC = () => {
     };
 
     const keyLoop = setInterval(() => {
-      if (!engineRef.current) return;
+      if (!engineRef.current || appFlow !== 'PLAYING') return;
       let dx = 0;
       let dy = 0;
 
@@ -247,11 +309,6 @@ export const App: React.FC = () => {
       const mag = Math.sqrt(dx * dx + dy * dy);
       if (mag > 0) {
         engineRef.current.inputVector = { x: dx / mag, y: dy / mag, magnitude: 1.0 };
-      } else if (!keysPressed['TouchActive']) {
-        // Only clear if no touch joystick is driving input
-        if (engineRef.current.inputVector.magnitude > 0 && !engineRef.current.sprintToggled) {
-          // let touch handler own it
-        }
       }
     }, 16);
 
@@ -263,102 +320,121 @@ export const App: React.FC = () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, []);
-
-  const handleRespawn = () => {
-    setIsGameOver(false);
-    if (engineRef.current) {
-      engineRef.current.respawn();
-    }
-  };
-
-  const handlePlayAgain = () => {
-    setIsVictory(false);
-    if (engineRef.current) {
-      engineRef.current.stats.score = 0;
-      engineRef.current.respawn();
-    }
-  };
+  }, [appFlow]);
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-ashen-950 font-sans select-none touch-none">
-      {/* 3D WebGL Canvas Layer */}
+      {/* 3D WebGL Canvas Layer (Runs persistently in background) */}
       <div ref={canvasContainerRef} className="absolute inset-0 w-full h-full z-0" />
 
-      {/* Screen Division: Camera Look Touch Drag Zone (Covers screen background) */}
-      <CameraTouchZone
-        config={settings.joystick}
-        onCameraRotate={handleCameraRotate}
-        className="absolute inset-0 z-0"
-      />
-
-      {/* Heads-Up Display (Vitals, Quest, Menus, Boss HP) */}
-      <GameHUD
-        stats={stats}
-        quest={quest}
-        boss={boss}
-        floatingTexts={floatingTexts}
-        fps={fps}
-        isMuted={isMuted}
-        onToggleMute={() => {
-          const muted = soundManager.toggleMute();
-          setIsMuted(muted);
-        }}
-        onOpenCalibration={() => setShowCalibrationModal(true)}
-        onOpenAndroidModal={() => setShowAndroidModal(true)}
-        onOpenCharacterModal={() => setShowCharacterModal(true)}
-      />
-
-      {/* Interactive Calibrated Touch Joystick (Bottom Left Zone) */}
-      <div
-        className={`absolute bottom-0 z-20 pointer-events-none ${
-          settings.joystick.leftHanded ? 'right-0' : 'left-0'
-        } w-1/2 h-1/2`}
-      >
-        <TouchJoystick
+      {/* Screen Division: Camera Look Touch Drag Zone (Active during gameplay) */}
+      {appFlow === 'PLAYING' && (
+        <CameraTouchZone
           config={settings.joystick}
-          onVectorChange={handleJoystickVector}
-          className="w-full h-full"
-        />
-      </div>
-
-      {/* Touch Combat Action Cluster (Bottom Right Zone) */}
-      <div
-        className={`absolute bottom-6 z-20 pointer-events-none ${
-          settings.joystick.leftHanded ? 'left-6' : 'right-6'
-        }`}
-      >
-        <TouchCombatControls
-          stats={stats}
-          isLockedOn={isLockedOn}
-          onLightAttack={() => engineRef.current?.triggerLightAttack()}
-          onHeavyCleave={() => engineRef.current?.triggerHeavyCleave()}
-          onRuneBurst={() => engineRef.current?.triggerRuneBurst()}
-          onDodgeRoll={() => engineRef.current?.triggerDodgeRoll()}
-          onParry={() => engineRef.current?.triggerParry()}
-          onJump={() => engineRef.current?.triggerJump()}
-          onHealPotion={() => engineRef.current?.triggerHealPotion()}
-          onToggleSprint={() => engineRef.current?.toggleSprint()}
-          onToggleLockOn={() => {
-            engineRef.current?.toggleLockOn();
-            setIsLockedOn(!!engineRef.current?.targetLockEnemy);
-          }}
-          onQuickTurn={() => engineRef.current?.quickTurn180()}
-          onToggleSword={() => engineRef.current?.triggerToggleSword()}
-          onSwordDash={() => engineRef.current?.triggerSwordDash()}
-          onToggleCrawl={() => engineRef.current?.toggleCrawl()}
-        />
-      </div>
-
-      {/* Modals & Dialogs */}
-      {showCalibrationModal && (
-        <JoystickCalibrationModal
-          config={settings.joystick}
-          onSave={handleSaveJoystickConfig}
-          onClose={() => setShowCalibrationModal(false)}
+          onCameraRotate={handleCameraRotate}
+          className="absolute inset-0 z-0"
         />
       )}
 
+      {/* Heads-Up Display (Vitals, Quest, Pause button, Boss HP) */}
+      {appFlow === 'PLAYING' && (
+        <GameHUD
+          stats={stats}
+          quest={quest}
+          boss={boss}
+          floatingTexts={floatingTexts}
+          isMuted={isMuted}
+          onToggleMute={handleToggleMute}
+          onOpenPause={() => setAppFlow('PAUSED')}
+        />
+      )}
+
+      {/* Interactive Calibrated Touch Joystick (Bottom Left Zone) */}
+      {appFlow === 'PLAYING' && (
+        <div
+          className={`absolute bottom-0 z-20 pointer-events-none ${
+            settings.joystick.leftHanded ? 'right-0' : 'left-0'
+          } w-1/2 h-1/2`}
+        >
+          <TouchJoystick
+            config={settings.joystick}
+            onVectorChange={handleJoystickVector}
+            className="w-full h-full"
+          />
+        </div>
+      )}
+
+      {/* Touch Combat Action Cluster (Bottom Right Zone) */}
+      {appFlow === 'PLAYING' && (
+        <div
+          className={`absolute bottom-6 z-20 pointer-events-none ${
+            settings.joystick.leftHanded ? 'left-6' : 'right-6'
+          }`}
+        >
+          <TouchCombatControls
+            stats={stats}
+            isLockedOn={isLockedOn}
+            onLightAttack={() => engineRef.current?.triggerLightAttack()}
+            onHeavyCleave={() => engineRef.current?.triggerHeavyCleave()}
+            onRuneBurst={() => engineRef.current?.triggerRuneBurst()}
+            onDodgeRoll={() => engineRef.current?.triggerDodgeRoll()}
+            onParry={() => engineRef.current?.triggerParry()}
+            onJump={() => engineRef.current?.triggerJump()}
+            onHealPotion={() => engineRef.current?.triggerHealPotion()}
+            onToggleSprint={() => engineRef.current?.toggleSprint()}
+            onToggleLockOn={() => {
+              engineRef.current?.toggleLockOn();
+              setIsLockedOn(!!engineRef.current?.targetLockEnemy);
+            }}
+            onQuickTurn={() => engineRef.current?.quickTurn180()}
+            onToggleSword={() => engineRef.current?.triggerToggleSword()}
+            onSwordDash={() => engineRef.current?.triggerSwordDash()}
+            onToggleCrawl={() => engineRef.current?.toggleCrawl()}
+          />
+        </div>
+      )}
+
+      {/* Screen 1: Loading Screen */}
+      {appFlow === 'LOADING' && (
+        <LoadingScreen progress={loadingProgress} statusText={loadingStatus} />
+      )}
+
+      {/* Screen 2: Main Menu */}
+      {appFlow === 'MENU' && (
+        <MainMenu
+          onPlay={handleStartGame}
+          onOpenSettings={() => setShowSettingsModal(true)}
+          onOpenAndroidDeployment={() => setShowAndroidModal(true)}
+          isMuted={isMuted}
+          onToggleMute={handleToggleMute}
+        />
+      )}
+
+      {/* Screen 3: Pause Menu */}
+      {appFlow === 'PAUSED' && (
+        <PauseMenu
+          onResume={handleResumeGame}
+          onOpenSettings={() => setShowSettingsModal(true)}
+          onOpenAndroidDeployment={() => setShowAndroidModal(true)}
+          onRestartChapter={handleRestartChapter}
+          onQuitToMainMenu={handleQuitToMainMenu}
+        />
+      )}
+
+      {/* Settings Modal (Accessible from Main Menu & Pause Menu) */}
+      {showSettingsModal && (
+        <PlayerSettingsModal
+          graphics={settings.graphics}
+          joystick={settings.joystick}
+          isMuted={isMuted}
+          onToggleMute={handleToggleMute}
+          onUpdateGraphics={handleSaveGraphicsConfig}
+          onUpdateJoystick={handleSaveJoystickConfig}
+          onClose={() => setShowSettingsModal(false)}
+        />
+      )}
+
+      {/* Android Deployment & Optimization Modal */}
       {showAndroidModal && (
         <AndroidDeploymentModal
           graphics={settings.graphics}
@@ -367,21 +443,13 @@ export const App: React.FC = () => {
         />
       )}
 
-      {showCharacterModal && (
-        <CharacterUploadModal
-          modelInfo={modelInfo}
-          onUploadFile={handleUploadCharacterFile}
-          onReloadFromFolder={handleReloadFromFolder}
-          onSaveCalibration={handleSaveModelCalibration}
-          onResetToDefault={handleResetCharacterToDefault}
-          onClose={() => setShowCharacterModal(false)}
-        />
-      )}
-
+      {/* Game Over Screen */}
       {isGameOver && <GameOverModal score={stats.score} onRespawn={handleRespawn} />}
 
+      {/* Victory Screen */}
       {isVictory && <VictoryModal score={stats.score} onPlayAgain={handlePlayAgain} />}
     </div>
   );
 };
+
 export default App;
