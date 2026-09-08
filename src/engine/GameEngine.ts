@@ -130,8 +130,9 @@ export class GameEngine {
     bossAppeared: false,
   };
 
-  // Joystick Input Vector
+  // Joystick Input Vector & Lerp Smoothed Vector for Jitter-Free Touch Digitisers
   public inputVector = { x: 0, y: 0, magnitude: 0 };
+  public smoothedInputVector = { x: 0, y: 0, magnitude: 0 };
   public sprintToggled = false;
 
   // 3D Visual Objects
@@ -222,9 +223,10 @@ export class GameEngine {
   public joystickConfig: JoystickConfig;
   public graphicSettings: GraphicSettings;
 
-  // FPS tracking
+  // FPS tracking & low-end auto-scaler
   private frameCount = 0;
   private lastFpsTime = 0;
+  private lowFpsCount = 0;
 
   constructor(
     container: HTMLElement,
@@ -315,9 +317,9 @@ export class GameEngine {
     if (graphics.resolutionScale >= 1.0) {
       targetRatio = Math.min(dpr, 1.25);
     } else if (graphics.resolutionScale >= 0.8) {
-      targetRatio = Math.min(dpr, 1.0);
+      targetRatio = Math.min(dpr, 0.9);
     } else {
-      targetRatio = 0.85;
+      targetRatio = 0.65; // High-efficiency fill rate for low-end GPUs (e.g. PowerVR GE8322 / itel A60)
     }
     this.renderer.setPixelRatio(targetRatio);
 
@@ -325,6 +327,9 @@ export class GameEngine {
       this.renderer.shadowMap.enabled = false;
       if (this.keyLight) this.keyLight.castShadow = false;
       if (this.groundMesh) this.groundMesh.receiveShadow = false;
+      this.braziers.forEach(b => {
+        if (b.light) b.light.visible = false;
+      });
     } else if (graphics.shadows === 'low') {
       this.renderer.shadowMap.enabled = true;
       this.renderer.shadowMap.type = THREE.BasicShadowMap;
@@ -335,6 +340,9 @@ export class GameEngine {
         this.keyLight.shadow.normalBias = 0.04;
       }
       if (this.groundMesh) this.groundMesh.receiveShadow = true;
+      this.braziers.forEach(b => {
+        if (b.light) b.light.visible = true;
+      });
     } else {
       this.renderer.shadowMap.enabled = true;
       this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -345,6 +353,9 @@ export class GameEngine {
         this.keyLight.shadow.normalBias = 0.04;
       }
       if (this.groundMesh) this.groundMesh.receiveShadow = true;
+      this.braziers.forEach(b => {
+        if (b.light) b.light.visible = true;
+      });
     }
   }
 
@@ -2068,13 +2079,29 @@ export class GameEngine {
     const clampedDelta = Math.min(delta, 0.05);
     const animTime = this.clock.getElapsedTime();
 
-    // FPS calculation
+    // FPS tracking and auto-tuning for low-end hardware
     this.frameCount++;
     const now = performance.now();
     if (now - this.lastFpsTime >= 1000) {
-      this.callbacks.onFpsUpdate(Math.round((this.frameCount * 1000) / (now - this.lastFpsTime)));
+      const currentFps = Math.round((this.frameCount * 1000) / (now - this.lastFpsTime));
+      this.callbacks.onFpsUpdate(currentFps);
       this.frameCount = 0;
       this.lastFpsTime = now;
+
+      if (currentFps < 30 && this.graphicSettings.resolutionScale > 0.75) {
+        this.lowFpsCount = (this.lowFpsCount || 0) + 1;
+        if (this.lowFpsCount >= 3) {
+          this.applyGraphicSettings({
+            ...this.graphicSettings,
+            resolutionScale: 0.75,
+            shadows: 'off',
+            particleDensity: 'low',
+          });
+          this.lowFpsCount = 0;
+        }
+      } else {
+        this.lowFpsCount = 0;
+      }
     }
 
     // 2. Update Cooldowns, Timers & Stamina
@@ -2180,9 +2207,21 @@ export class GameEngine {
       this.playerVelocity.x = Math.sin(this.playerRotationY) * crawlSpeed;
       this.playerVelocity.z = Math.cos(this.playerRotationY) * crawlSpeed;
     } else {
-      if (this.inputVector.magnitude > 0.05) {
-        const inX = this.inputVector.x;
-        const inY = this.inputVector.y;
+      // Smooth input vector lerp to eliminate digitizer jitter on low-end touchscreens
+      const lerpSpeed = Math.min(1.0, 22.0 * clampedDelta);
+      this.smoothedInputVector.x += (this.inputVector.x - this.smoothedInputVector.x) * lerpSpeed;
+      this.smoothedInputVector.y += (this.inputVector.y - this.smoothedInputVector.y) * lerpSpeed;
+      this.smoothedInputVector.magnitude += (this.inputVector.magnitude - this.smoothedInputVector.magnitude) * lerpSpeed;
+
+      if (this.inputVector.magnitude < 0.02 && this.smoothedInputVector.magnitude < 0.02) {
+        this.smoothedInputVector.x = 0;
+        this.smoothedInputVector.y = 0;
+        this.smoothedInputVector.magnitude = 0;
+      }
+
+      if (this.smoothedInputVector.magnitude > 0.03) {
+        const inX = this.smoothedInputVector.x;
+        const inY = this.smoothedInputVector.y;
         const camYaw = this.cameraYaw;
 
         const moveDirX = inX * Math.cos(camYaw) - inY * Math.sin(camYaw);
@@ -2195,7 +2234,7 @@ export class GameEngine {
         while (diff > Math.PI) diff -= Math.PI * 2;
         this.playerRotationY += diff * 14.0 * clampedDelta;
 
-        const effectiveMag = Math.min(1.0, this.inputVector.magnitude);
+        const effectiveMag = Math.min(1.0, this.smoothedInputVector.magnitude);
         const speed = effectiveMag * moveSpeed;
 
         this.playerVelocity.x = moveDirX * speed;
@@ -2517,10 +2556,19 @@ export class GameEngine {
     this.camera.position.copy(this.smoothedCamPos);
     this.camera.lookAt(this.smoothedCamTarget);
 
-    // 8. Flickering Brazier Fire
-    this.braziers.forEach((b, i) => {
-      b.light.intensity = 1.8 + Math.sin(animTime * 8 + i * 2) * 0.4;
-    });
+    // 8. Flickering Brazier Fire with Distance Culling for Low-End GPUs
+    if (this.graphicSettings.shadows !== 'off') {
+      this.braziers.forEach((b, i) => {
+        const bdx = px - b.x;
+        const bdz = pz - b.z;
+        if (bdx * bdx + bdz * bdz < 22 * 22) {
+          b.light.visible = true;
+          b.light.intensity = 1.8 + Math.sin(animTime * 8 + i * 2) * 0.4;
+        } else {
+          b.light.visible = false;
+        }
+      });
+    }
 
     // 9. Update Reusable Particle Pool
     for (let i = 0; i < this.particlePool.length; i++) {
@@ -2568,7 +2616,7 @@ export class GameEngine {
       this.stats.isSwordEquipped !== this.prevSword ||
       this.stats.canDoubleJump !== this.prevCanDJ;
 
-    if (statsChanged && nowMs - this.lastStatsEmitTime >= 60) {
+    if (statsChanged && nowMs - this.lastStatsEmitTime >= 100) {
       this.lastStatsEmitTime = nowMs;
       this.prevHp = this.stats.hp;
       this.prevStamina = this.stats.stamina;

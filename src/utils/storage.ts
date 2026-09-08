@@ -85,12 +85,18 @@ export const JOYSTICK_PRESETS: Record<string, { name: string; desc: string; conf
   }
 };
 
+const nav = typeof navigator !== 'undefined' ? (navigator as any) : {};
+const isLowEndDevice =
+  typeof navigator !== 'undefined' &&
+  ((nav.deviceMemory && nav.deviceMemory <= 3) ||
+    (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4));
+
 export const DEFAULT_GRAPHICS: GraphicSettings = {
-  resolutionScale: 1.0,
+  resolutionScale: isLowEndDevice ? 0.75 : 1.0,
   targetFps: 60,
-  shadows: 'low',
-  bloom: true,
-  particleDensity: 'high',
+  shadows: isLowEndDevice ? 'off' : 'low',
+  bloom: !isLowEndDevice,
+  particleDensity: isLowEndDevice ? 'low' : 'high',
 };
 
 const STORAGE_KEY = 'ashen_realm_settings_v1';
