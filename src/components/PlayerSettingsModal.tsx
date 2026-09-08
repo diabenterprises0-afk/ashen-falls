@@ -86,7 +86,7 @@ export const PlayerSettingsModal: React.FC<PlayerSettingsModalProps> = ({
                   ? graphics.shadows === 'high' && graphics.resolutionScale >= 1.0
                   : quality === 'medium'
                   ? graphics.shadows !== 'off' && graphics.resolutionScale < 1.0
-                  : graphics.shadows === 'off';
+                  : graphics.shadows === 'off' || graphics.lowEndMode;
 
               return (
                 <button
@@ -94,11 +94,32 @@ export const PlayerSettingsModal: React.FC<PlayerSettingsModalProps> = ({
                   onClick={() => {
                     triggerHaptic(15);
                     if (quality === 'high') {
-                      onUpdateGraphics({ ...graphics, shadows: 'high', resolutionScale: 1.0 });
+                      onUpdateGraphics({
+                        ...graphics,
+                        shadows: 'high',
+                        resolutionScale: 1.0,
+                        targetFps: 60,
+                        particleDensity: 'high',
+                        lowEndMode: false,
+                      });
                     } else if (quality === 'medium') {
-                      onUpdateGraphics({ ...graphics, shadows: 'low', resolutionScale: 0.85 });
+                      onUpdateGraphics({
+                        ...graphics,
+                        shadows: 'low',
+                        resolutionScale: 0.85,
+                        targetFps: 60,
+                        particleDensity: 'medium',
+                        lowEndMode: false,
+                      });
                     } else {
-                      onUpdateGraphics({ ...graphics, shadows: 'off', resolutionScale: 0.75 });
+                      onUpdateGraphics({
+                        ...graphics,
+                        shadows: 'off',
+                        resolutionScale: 0.75,
+                        targetFps: 30,
+                        particleDensity: 'low',
+                        lowEndMode: true,
+                      });
                     }
                   }}
                   className={`py-2.5 px-2 rounded-xl border text-center transition-all ${
@@ -107,9 +128,11 @@ export const PlayerSettingsModal: React.FC<PlayerSettingsModalProps> = ({
                       : 'bg-ashen-900/40 border-ashen-800 text-ashen-400 hover:border-ashen-700'
                   }`}
                 >
-                  <p className="text-xs capitalize">{quality}</p>
+                  <p className="text-xs capitalize font-bold">
+                    {quality === 'low' ? 'itel A60' : quality === 'medium' ? 'Balanced' : 'Ultra'}
+                  </p>
                   <p className="text-[9px] text-ashen-400 mt-0.5 font-mono">
-                    {quality === 'high' ? '60 FPS Ultra' : quality === 'medium' ? 'Balanced' : 'Performance'}
+                    {quality === 'high' ? '60 FPS High' : quality === 'medium' ? '60 FPS Smooth' : '30 FPS Lock'}
                   </p>
                 </button>
               );

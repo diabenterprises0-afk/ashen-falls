@@ -312,16 +312,16 @@ export class GameEngine {
 
     const dpr = window.devicePixelRatio || 1;
     let targetRatio = 1.0;
-    if (graphics.resolutionScale >= 1.0) {
+    if (graphics.lowEndMode || graphics.resolutionScale <= 0.75) {
+      targetRatio = Math.min(dpr * 0.75, 0.85);
+    } else if (graphics.resolutionScale >= 1.0) {
       targetRatio = Math.min(dpr, 1.25);
-    } else if (graphics.resolutionScale >= 0.8) {
-      targetRatio = Math.min(dpr, 1.0);
     } else {
-      targetRatio = 0.85;
+      targetRatio = Math.min(dpr, 1.0);
     }
     this.renderer.setPixelRatio(targetRatio);
 
-    if (graphics.shadows === 'off') {
+    if (graphics.shadows === 'off' || graphics.lowEndMode) {
       this.renderer.shadowMap.enabled = false;
       if (this.keyLight) this.keyLight.castShadow = false;
       if (this.groundMesh) this.groundMesh.receiveShadow = false;
@@ -346,6 +346,12 @@ export class GameEngine {
       }
       if (this.groundMesh) this.groundMesh.receiveShadow = true;
     }
+
+    // Toggle point lights for low-end mobile optimization (emissive fire mesh stays visible)
+    const enablePointLights = !graphics.lowEndMode && graphics.shadows !== 'off';
+    this.braziers.forEach(b => {
+      if (b.light) b.light.visible = enablePointLights;
+    });
   }
 
   private onWindowResize = () => {
@@ -853,14 +859,14 @@ export class GameEngine {
         if (child.geometry && child.geometry.attributes && child.geometry.attributes.position) {
           vertexCount += child.geometry.attributes.position.count;
         }
-        child.castShadow = this.modelConfig.castShadows;
-        child.receiveShadow = true;
+        child.castShadow = this.graphicSettings.shadows !== 'off' && this.modelConfig.castShadows;
+        child.receiveShadow = this.graphicSettings.shadows !== 'off';
         child.frustumCulled = true;
 
         const mats = Array.isArray(child.material) ? child.material : [child.material];
         for (const mat of mats) {
           if (!mat) continue;
-          mat.side = THREE.DoubleSide;
+          mat.side = THREE.FrontSide;
           if (mat.map) {
             mat.map.colorSpace = THREE.SRGBColorSpace;
           }
@@ -868,12 +874,9 @@ export class GameEngine {
             mat.emissiveMap.colorSpace = THREE.SRGBColorSpace;
           }
           if (mat.roughness !== undefined && mat.roughness < 0.2) {
-            mat.roughness = 0.25;
+            mat.roughness = 0.3;
           }
-          if (mat.color && mat.color.r === 0 && mat.color.g === 0 && mat.color.b === 0 && !mat.map) {
-            mat.color.setHex(0x333333); // Prevent pitch-black untextured sub-meshes
-          }
-          mat.envMapIntensity = 1.25;
+          mat.envMapIntensity = this.graphicSettings.lowEndMode ? 0.6 : 1.25;
           mat.needsUpdate = true;
         }
       }
@@ -2065,7 +2068,7 @@ export class GameEngine {
   // Unified Authoritative Game Loop
   public update(delta: number) {
     // 1. Clamped delta prevents physics/teleport anomalies during backgrounding or frame drops
-    const clampedDelta = Math.min(delta, 0.05);
+    const clampedDelta = Math.min(delta, 0.0333);
     const animTime = this.clock.getElapsedTime();
 
     // FPS calculation
@@ -2237,19 +2240,14 @@ export class GameEngine {
     this.playerPosition.x += this.playerVelocity.x * clampedDelta;
     this.playerPosition.z += this.playerVelocity.z * clampedDelta;
 
-    // Obstacle capsule collision (tangent wall-sliding & zero-distance anti-stuck)
+    // Obstacle capsule collision (tangent wall-sliding)
     for (let i = 0; i < this.arenaObstacles.length; i++) {
       const obs = this.arenaObstacles[i];
-      let dx = this.playerPosition.x - obs.x;
-      let dz = this.playerPosition.z - obs.z;
-      let distSq = dx * dx + dz * dz;
+      const dx = this.playerPosition.x - obs.x;
+      const dz = this.playerPosition.z - obs.z;
+      const distSq = dx * dx + dz * dz;
       const minD = obs.radius;
-      if (distSq < minD * minD) {
-        if (distSq < 0.0001) {
-          dx = 0.01;
-          dz = 0.01;
-          distSq = dx * dx + dz * dz;
-        }
+      if (distSq < minD * minD && distSq > 0.0001) {
         const dist = Math.sqrt(distSq);
         const nx = dx / dist;
         const nz = dz / dist;
@@ -2517,10 +2515,14 @@ export class GameEngine {
     this.camera.position.copy(this.smoothedCamPos);
     this.camera.lookAt(this.smoothedCamTarget);
 
-    // 8. Flickering Brazier Fire
-    this.braziers.forEach((b, i) => {
-      b.light.intensity = 1.8 + Math.sin(animTime * 8 + i * 2) * 0.4;
-    });
+    // 8. Flickering Brazier Fire (skipped in low-end mode for zero CPU/GPU overhead)
+    if (!this.graphicSettings.lowEndMode && this.graphicSettings.shadows !== 'off') {
+      this.braziers.forEach((b, i) => {
+        if (b.light.visible) {
+          b.light.intensity = 1.8 + Math.sin(animTime * 8 + i * 2) * 0.4;
+        }
+      });
+    }
 
     // 9. Update Reusable Particle Pool
     for (let i = 0; i < this.particlePool.length; i++) {
@@ -2593,12 +2595,8 @@ export class GameEngine {
 
     const loop = () => {
       if (!this.isRunning) return;
-      try {
-        const delta = this.clock.getDelta();
-        this.update(delta);
-      } catch (err) {
-        console.error('Error in render loop:', err);
-      }
+      const delta = this.clock.getDelta();
+      this.update(delta);
       this.animationFrameId = requestAnimationFrame(loop);
     };
     loop();

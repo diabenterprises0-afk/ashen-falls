@@ -45,11 +45,12 @@ export interface JoystickConfig {
 }
 
 export interface GraphicSettings {
-  resolutionScale: number; // 0.75, 1.0, 1.25
+  resolutionScale: number; // 0.65, 0.75, 1.0, 1.25
   targetFps: number; // 30, 60, 120
   shadows: 'off' | 'low' | 'high';
   bloom: boolean;
   particleDensity: 'low' | 'medium' | 'high';
+  lowEndMode?: boolean; // Optimized specifically for low-end devices like itel A60
 }
 
 export interface PlayerStats {

@@ -85,13 +85,47 @@ export const JOYSTICK_PRESETS: Record<string, { name: string; desc: string; conf
   }
 };
 
-export const DEFAULT_GRAPHICS: GraphicSettings = {
-  resolutionScale: 1.0,
+export const LOW_END_GRAPHICS: GraphicSettings = {
+  resolutionScale: 0.75,
+  targetFps: 30,
+  shadows: 'off',
+  bloom: false,
+  particleDensity: 'low',
+  lowEndMode: true,
+};
+
+export const BALANCED_GRAPHICS: GraphicSettings = {
+  resolutionScale: 0.85,
   targetFps: 60,
   shadows: 'low',
+  bloom: false,
+  particleDensity: 'medium',
+  lowEndMode: false,
+};
+
+export const ULTRA_GRAPHICS: GraphicSettings = {
+  resolutionScale: 1.0,
+  targetFps: 60,
+  shadows: 'high',
   bloom: true,
   particleDensity: 'high',
+  lowEndMode: false,
 };
+
+export const DEFAULT_GRAPHICS: GraphicSettings = (() => {
+  if (typeof window !== 'undefined') {
+    const isMobile =
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+      (window.innerWidth < 800 && 'ontouchstart' in window);
+    const isLowMemory = (navigator as any).deviceMemory && (navigator as any).deviceMemory <= 3;
+    const isLowConcurrency = navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4;
+
+    if (isMobile || isLowMemory || isLowConcurrency) {
+      return { ...LOW_END_GRAPHICS };
+    }
+  }
+  return { ...BALANCED_GRAPHICS };
+})();
 
 const STORAGE_KEY = 'ashen_realm_settings_v1';
 

@@ -26,6 +26,8 @@ export interface LoadedGameAssets {
 const CACHE_NAME = 'ashen-realm-assets-v1';
 const HERO_CACHE_KEY = '/models/Ash.glb';
 
+let cachedGameAssets: LoadedGameAssets | null = null;
+
 export class ParallelAssetLoader {
   private abortController: AbortController | null = null;
 
@@ -36,6 +38,19 @@ export class ParallelAssetLoader {
   public async loadAll(
     onProgress?: (progress: AssetLoadingProgress) => void
   ): Promise<LoadedGameAssets> {
+    if (cachedGameAssets) {
+      if (onProgress) {
+        onProgress({
+          percent: 100,
+          statusText: 'Assets ready from instantaneous memory cache',
+          bytesLoaded: 100,
+          totalBytes: 100,
+          speedMBps: 0,
+        });
+      }
+      return cachedGameAssets;
+    }
+
     this.abortController = new AbortController();
 
     let glbLoadedBytes = 0;
@@ -95,11 +110,13 @@ export class ParallelAssetLoader {
       });
     }
 
-    return {
+    const result: LoadedGameAssets = {
       heroGlbBuffer: glbResult,
       textures: texturesResult,
       fromCache: isFromCache,
     };
+    cachedGameAssets = result;
+    return result;
   }
 
   /**
