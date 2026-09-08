@@ -1,0 +1,18 @@
+{
+  "short_name": "AshenRealm",
+  "name": "Ashen Realm: 3D Action RPG",
+  "description": "A cinematic 3D third-person dark fantasy action RPG set in the ruined kingdom of Aethelgard.",
+  "icons": [
+    {
+      "src": "/ashen-crest.svg",
+      "type": "image/svg+xml",
+      "sizes": "192x192 512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#06050a",
+  "theme_color": "#06050a",
+  "display": "fullscreen",
+  "orientation": "landscape"
+}
