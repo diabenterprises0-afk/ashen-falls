@@ -7,6 +7,7 @@ on:
 
 jobs:
   build:
+    name: Build Debug APK
     runs-on: ubuntu-latest
 
     steps:
@@ -19,31 +20,64 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Install Web Dependencies
-        run: npm ci
+      - name: Install Dependencies
+        run: npm ci || npm install
 
-      - name: Build Web Game Distribution
+      - name: Build Web Application
         run: npm run build
 
-      - name: Set up Java 17
+      - name: Set up Java JDK
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
-          java-version: '17'
+          java-version: '21'
 
-      - name: Initialize Capacitor Android Project
+      - name: Sync Capacitor Native Android Project
+        run: npx cap sync android
+
+      - name: Validate Android Project Structure
         run: |
-          npx @capacitor/cli init "Ashen Realm" "com.aistudio.ashenrealm.vkwq" --web-dir "dist"
-          npm install @capacitor/core @capacitor/android
-          npx cap add android
-          npx cap sync android
+          if [ ! -d "android" ]; then
+            echo "Error: Android project directory 'android' not found!"
+            exit 1
+          fi
+          if [ ! -f "android/gradlew" ]; then
+            echo "Error: Gradle wrapper 'android/gradlew' not found!"
+            exit 1
+          fi
+          if [ ! -d "android/app" ]; then
+            echo "Error: Application module 'android/app' not found!"
+            exit 1
+          fi
+          echo "Android project structure validated successfully."
+
+      - name: Grant Execute Permission for Gradle Wrapper
+        run: chmod +x android/gradlew
+
+      - name: Clean Stale Build Caches
+        run: |
+          rm -rf android/.gradle
+          rm -rf android/app/build
 
       - name: Build Debug APK
         working-directory: ./android
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Locate and Verify Generated APK
+        id: locate_apk
+        run: |
+          APK_FILES=$(find android/app/build/outputs/apk/debug -maxdepth 2 -name "*.apk")
+          if [ -z "$APK_FILES" ]; then
+            echo "Error: No APK file generated!"
+            exit 1
+          fi
+          echo "Found APK file(s):"
+          echo "$APK_FILES"
+          echo "apk_path=$(echo "$APK_FILES" | head -n 1)" >> $GITHUB_OUTPUT
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ashen-realm-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: android-app-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
